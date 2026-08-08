@@ -1,0 +1,19 @@
+{
+  "name": "stremio-offline",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "shared",
+    "service",
+    "addon"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:service": "npm run dev --workspace service",
+    "start:service": "npm run start --workspace service",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

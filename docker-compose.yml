@@ -1,0 +1,16 @@
+services:
+  stremio-offline:
+    build: .
+    image: stremio-offline:local
+    restart: unless-stopped
+    ports:
+      - "11470:11470" # HTTP (P1 adds 12470 for HTTPS)
+    environment:
+      - PORT=11470
+      - STORAGE_ROOT=/data
+      # - PUBLIC_BASE_URL=https://your-host.stremio.rocks:12470   # set once P1 cert transport lands
+    volumes:
+      - stremio-offline-data:/data
+
+volumes:
+  stremio-offline-data:
