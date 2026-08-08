@@ -8,9 +8,11 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@fastify/cors": "^9.0.1",
     "@stremio-offline/shared": "0.1.0",
     "better-sqlite3": "^11.3.0",
     "fastify": "^4.28.1",
