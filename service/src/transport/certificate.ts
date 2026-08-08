@@ -1,4 +1,5 @@
 import { X509Certificate } from "node:crypto";
+import { backoffMs, sleep } from "../util/backoff.js";
 
 const CERTIFICATE_GET_URL = "https://api.strem.io/api/certificateGet";
 
@@ -20,15 +21,6 @@ interface CertificateGetResponse {
 
 interface CertificateContents {
   contents?: { Certificate?: string; PrivateKey?: string };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function backoffMs(attempt: number): number {
-  const base = Math.min(1000 * 2 ** attempt, 5 * 60_000);
-  return base + Math.random() * base * 0.2; // jitter
 }
 
 /**

@@ -1,17 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { statfs } from "node:fs/promises";
 import type { HealthReport, SubsystemStatus } from "@stremio-offline/shared";
 import type { Database } from "better-sqlite3";
+import { getFreeBytes } from "../storage/diskspace.js";
 
 async function checkDisk(storageRoot: string): Promise<{ status: SubsystemStatus; freeBytes: number | null }> {
-  try {
-    const stats = await statfs(storageRoot);
-    const freeBytes = stats.bsize * stats.bavail;
-    return { status: freeBytes > 0 ? "ok" : "degraded", freeBytes };
-  } catch {
+  const freeBytes = await getFreeBytes(storageRoot);
+  if (freeBytes === null) {
     // statfs is unavailable on some platforms (e.g. Windows) — non-fatal, just unknown.
     return { status: "degraded", freeBytes: null };
   }
+  return { status: freeBytes > 0 ? "ok" : "degraded", freeBytes };
 }
 
 function checkDb(db: Database): SubsystemStatus {

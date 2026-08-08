@@ -2,6 +2,8 @@ import { join } from "node:path";
 import type { SubsystemStatus } from "@stremio-offline/shared";
 import { buildApp } from "./app.js";
 import { closeDb, openDb } from "./db/client.js";
+import { reconcile } from "./queue/reconcile.js";
+import { startQueueRunner } from "./queue/runner.js";
 import { acquireHttpsTransport } from "./transport/certManager.js";
 import { loadOrCreateSecret } from "./transport/secretStore.js";
 
@@ -21,6 +23,22 @@ const loggerOptions = {
 async function main(): Promise<void> {
   const db = openDb(DB_PATH);
   const fileTokenSecret = loadOrCreateSecret(join(STORAGE_ROOT, ".offline", "file-token-secret"));
+
+  // The DB is a cache of filesystem reality, never the other way round —
+  // CLAUDE.md §4. Must run before the queue runner starts pulling jobs.
+  const reconcileResult = await reconcile(db, STORAGE_ROOT);
+  if (reconcileResult.requeued.length || reconcileResult.markedFailed.length || reconcileResult.orphansDeleted.length) {
+    console.log(
+      JSON.stringify({
+        msg: "boot reconciliation complete",
+        requeued: reconcileResult.requeued.length,
+        markedFailed: reconcileResult.markedFailed.length,
+        orphansDeleted: reconcileResult.orphansDeleted.length,
+      }),
+    );
+  }
+
+  const queueRunner = startQueueRunner({ db, storageRoot: STORAGE_ROOT });
 
   let certStatus: SubsystemStatus = "down";
   let certExpiresAt: string | null = null;
@@ -85,6 +103,11 @@ async function main(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     httpApp.log.info({ signal }, "shutting down");
     try {
+      // Stop pulling new work first; the in-flight download (if any) keeps
+      // writing to its .part file until its current chunk finishes, which is
+      // safe to interrupt at any point — the next boot's reconciliation
+      // picks up wherever it left off.
+      await queueRunner.stop();
       await httpApp.close();
       if (httpsApp) await httpsApp.close();
       closeDb();

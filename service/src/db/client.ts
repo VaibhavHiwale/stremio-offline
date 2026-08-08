@@ -7,9 +7,8 @@ const SCHEMA_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "d
 
 let db: Database.Database | undefined;
 
-export function openDb(dbFilePath: string): Database.Database {
-  if (db) return db;
-
+/** Creates a fresh, fully-initialized connection — not the app-wide singleton. Tests use this directly so each test gets an isolated database. */
+export function createDbConnection(dbFilePath: string): Database.Database {
   mkdirSync(dirname(dbFilePath), { recursive: true });
 
   const conn = new Database(dbFilePath);
@@ -21,8 +20,13 @@ export function openDb(dbFilePath: string): Database.Database {
   const schema = readFileSync(SCHEMA_PATH, "utf8");
   conn.exec(schema);
 
-  db = conn;
   return conn;
+}
+
+export function openDb(dbFilePath: string): Database.Database {
+  if (db) return db;
+  db = createDbConnection(dbFilePath);
+  return db;
 }
 
 export function getDb(): Database.Database {
