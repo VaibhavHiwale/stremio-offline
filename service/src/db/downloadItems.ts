@@ -3,6 +3,11 @@ import type { Database } from "better-sqlite3";
 export interface QueueRow {
   id: string;
   stremioId: string;
+  type: "movie" | "series";
+  title: string;
+  year: number | null;
+  season: number | null;
+  episode: number | null;
   quality: string;
   sourceKind: string;
   sourceUrl: string;
@@ -18,7 +23,8 @@ export interface QueueRow {
 }
 
 const ROW_COLUMNS = `
-  id, stremio_id AS stremioId, quality, source_kind AS sourceKind, source_url AS sourceUrl,
+  id, stremio_id AS stremioId, type, title, year, season, episode,
+  quality, source_kind AS sourceKind, source_url AS sourceUrl,
   source_etag AS sourceEtag, status, bytes_downloaded AS bytesDownloaded, bytes_total AS bytesTotal,
   storage_target_id AS storageTargetId, file_path_original AS filePathOriginal,
   attempt_count AS attemptCount, priority, added_at AS addedAt
@@ -129,6 +135,15 @@ export function markFailed(db: Database, id: string, reason: string, retryable: 
 
 export function incrementAttempt(db: Database, id: string): void {
   db.prepare(`UPDATE download_items SET attempt_count = attempt_count + 1 WHERE id = ?`).run(id);
+}
+
+/** Remux verified and published into the library — the file is now playable. */
+export function markReady(db: Database, id: string, patch: { filePathWebReady: string }): void {
+  db.prepare(
+    `UPDATE download_items
+     SET status = 'ready', file_path_web_ready = ?, completed_at = datetime('now'), last_error = NULL
+     WHERE id = ?`,
+  ).run(patch.filePathWebReady, id);
 }
 
 /** Download phase complete, raw file in place — awaiting the P4 remux stage. */
