@@ -10,6 +10,7 @@ const HTTPS_PORT = Number(process.env.HTTPS_PORT ?? 12470);
 const STORAGE_ROOT = process.env.STORAGE_ROOT ?? join(process.cwd(), "data");
 const DB_PATH = process.env.DB_PATH ?? join(STORAGE_ROOT, ".offline", "db.sqlite");
 const SKIP_CERT_ACQUISITION = process.env.SKIP_CERT_ACQUISITION === "1";
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ?? null;
 
 const loggerOptions = {
   level: process.env.LOG_LEVEL ?? "info",
@@ -34,6 +35,7 @@ async function main(): Promise<void> {
     db,
     storageRoot: STORAGE_ROOT,
     fileTokenSecret,
+    configuredBaseUrl: PUBLIC_BASE_URL,
     getCertInfo,
     logger: loggerOptions,
   });
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
       db,
       storageRoot: STORAGE_ROOT,
       fileTokenSecret,
+      configuredBaseUrl: PUBLIC_BASE_URL ?? `https://${transport.domain}:${HTTPS_PORT}`,
       getCertInfo,
       logger: loggerOptions,
       https: { key: transport.key, cert: transport.cert },

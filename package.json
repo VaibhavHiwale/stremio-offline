@@ -4,11 +4,11 @@
   "version": "0.1.0",
   "workspaces": [
     "shared",
-    "service",
-    "addon"
+    "addon",
+    "service"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace shared && npm run build --workspace addon && npm run build --workspace service",
     "dev:service": "npm run dev --workspace service",
     "start:service": "npm run start --workspace service",
     "typecheck": "npm run typecheck --workspaces --if-present"

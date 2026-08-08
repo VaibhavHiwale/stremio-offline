@@ -1,14 +1,20 @@
 import cors from "@fastify/cors";
+import { registerAddonRoutes } from "@stremio-offline/addon";
 import type { Database } from "better-sqlite3";
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { buildHealthReport } from "./api/health.js";
-import { registerFilesRoute } from "./api/files.js";
+import { buildSignedFileUrl, registerFilesRoute } from "./api/files.js";
 import type { SubsystemStatus } from "@stremio-offline/shared";
+import { resolveBaseUrl } from "./transport/baseUrl.js";
+
+const FILE_URL_TTL_SECONDS = 6 * 60 * 60; // long enough for a full movie to buffer/seek around in
 
 export interface AppDeps {
   db: Database;
   storageRoot: string;
   fileTokenSecret: string;
+  /** Explicit override (env PUBLIC_BASE_URL, or the domain from an acquired cert) — see transport/baseUrl.ts. */
+  configuredBaseUrl: string | null;
   /** Read live, not snapshotted — cert acquisition finishes after boot. */
   getCertInfo: () => { status: SubsystemStatus; expiresAt: string | null };
   logger: { level: string; redact: string[] };
@@ -50,6 +56,21 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerFilesRoute(app, { db: deps.db, secret: deps.fileTokenSecret });
+
+  registerAddonRoutes(app, {
+    db: deps.db,
+    buildFileUrl: (req: FastifyRequest, downloadItemId: string) => {
+      const baseUrl = resolveBaseUrl(req, deps.configuredBaseUrl);
+      return buildSignedFileUrl(baseUrl, deps.fileTokenSecret, downloadItemId, FILE_URL_TTL_SECONDS);
+    },
+    resolveBaseUrl: (req: FastifyRequest) => {
+      try {
+        return resolveBaseUrl(req, deps.configuredBaseUrl);
+      } catch {
+        return null;
+      }
+    },
+  });
 
   return app;
 }
