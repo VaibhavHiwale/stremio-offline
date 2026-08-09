@@ -17,7 +17,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P5 Queue | ✅ done, pushed | commit `3f8cb8a` |
 | P6 Resolvers | ✅ done, pushed | commit `30ae4b4` — **unverified against real debrid APIs**, see below |
 | P7 Subtitles | ✅ done, pushed | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
-| P8 Storage | ✅ done, **not yet pushed** | see below — fully verified end-to-end, including the real background sweeper |
+| P8 Storage | ✅ done, pushed | commit `98022a1` — see below, fully verified end-to-end, including the real background sweeper |
 | P9 Progress + dashboard | not started | |
 | P10 Episode auto-download | not started | |
 | P11 Resume playback | not started | |
