@@ -17,6 +17,18 @@ export type DownloadStatus =
 
 export type SourceKind = "http" | "magnet" | "debrid";
 
+// --- Debrid (P6) ------------------------------------------------------------
+
+export type DebridService = "realdebrid" | "alldebrid" | "premiumize" | "debridlink" | "torbox";
+
+/** One row per service the user has configured — CLAUDE.md §3 Rule 7. */
+export interface DebridAccount {
+  service: DebridService;
+  apiKey: string;
+  enabled: boolean;
+  addedAt: string;
+}
+
 export type ContentType = "movie" | "series";
 
 export interface DownloadItem {

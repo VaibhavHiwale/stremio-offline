@@ -3,6 +3,7 @@ import { registerAddonRoutes } from "@stremio-offline/addon";
 import type { Database } from "better-sqlite3";
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { buildHealthReport } from "./api/health.js";
+import { registerDebridAccountsRoutes } from "./api/debridAccounts.js";
 import { registerDownloadsRoutes } from "./api/downloads.js";
 import { buildSignedFileUrl, registerFilesRoute } from "./api/files.js";
 import type { SubsystemStatus } from "@stremio-offline/shared";
@@ -55,7 +56,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       activeJobs: deps.scheduler.activeCount() + deps.remuxRunner.activeCount(),
       certStatus: certInfo.status,
       certExpiresAt: certInfo.expiresAt,
-      debridStatus: "down",
     });
     return reply.code(report.status === "down" ? 503 : 200).send(report);
   });
@@ -68,6 +68,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     scheduler: deps.scheduler,
     remuxRunner: deps.remuxRunner,
   });
+
+  registerDebridAccountsRoutes(app, { db: deps.db });
 
   registerAddonRoutes(app, {
     db: deps.db,

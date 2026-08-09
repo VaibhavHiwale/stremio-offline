@@ -3,6 +3,7 @@ import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import type { HealthReport, SubsystemStatus } from "@stremio-offline/shared";
 import type { Database } from "better-sqlite3";
 import ffmpegBinaryPathRaw from "ffmpeg-static";
+import { listDebridAccounts } from "../db/debridAccounts.js";
 import { getFreeBytes } from "../storage/diskspace.js";
 
 const ffmpegBinaryPath = ffmpegBinaryPathRaw as unknown as string | null;
@@ -40,19 +41,30 @@ function checkFfmpeg(): SubsystemStatus {
   }
 }
 
+/**
+ * Doesn't actually call out to the configured service(s) — that would slow
+ * down every health check and needs live credentials to mean anything.
+ * "ok" here means "at least one debrid account is configured and enabled",
+ * i.e. Rule 7's debrid-first path has somewhere to go; "down" means only
+ * the webtorrent fallback is available.
+ */
+function checkDebrid(db: Database): SubsystemStatus {
+  return listDebridAccounts(db).some((a) => a.enabled) ? "ok" : "down";
+}
+
 export interface HealthDeps {
   db: Database;
   storageRoot: string;
   activeJobs: number;
   certStatus: SubsystemStatus;
   certExpiresAt: string | null;
-  debridStatus: SubsystemStatus;
 }
 
 export async function buildHealthReport(deps: HealthDeps): Promise<HealthReport> {
   const dbStatus = checkDb(deps.db);
   const disk = await checkDisk(deps.storageRoot);
   const ffmpegStatus = checkFfmpeg();
+  const debridStatus = checkDebrid(deps.db);
 
   // Cert/ffmpeg/debrid are expected "down" until P1/P4/P6 land — they're reported for
   // diagnostics but don't fail the overall status until those phases are built.
@@ -69,7 +81,7 @@ export async function buildHealthReport(deps: HealthDeps): Promise<HealthReport>
       certExpiresAt: deps.certExpiresAt,
       activeJobs: deps.activeJobs,
       ffmpeg: ffmpegStatus,
-      debrid: deps.debridStatus,
+      debrid: debridStatus,
     },
   };
 }

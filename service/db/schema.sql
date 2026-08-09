@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS source_addons (
   added_at      TEXT NOT NULL
 );
 
+-- One row per debrid service the user has configured — CLAUDE.md §3 Rule 7.
+-- `service` is the primary key: only one account per service, matching
+-- autodetect.ts's "which services are configured" query.
+CREATE TABLE IF NOT EXISTS debrid_accounts (
+  service  TEXT PRIMARY KEY CHECK (service IN ('realdebrid','alldebrid','premiumize','debridlink','torbox')),
+  api_key  TEXT NOT NULL,
+  enabled  INTEGER NOT NULL DEFAULT 1,
+  added_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

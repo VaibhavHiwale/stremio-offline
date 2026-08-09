@@ -48,6 +48,12 @@ function validateEnqueueBody(body: EnqueueBody): string | null {
   if (!body.quality || !VALID_QUALITIES.has(body.quality)) return "quality is invalid";
   if (!body.sourceKind || !VALID_SOURCE_KINDS.has(body.sourceKind)) return "sourceKind is invalid";
   if (!body.sourceUrl) return "sourceUrl is required";
+  // magnet/debrid rows carry a magnet URI in sourceUrl (P6) — the runner
+  // resolves 'debrid' rows to a direct URL fresh on every attempt instead
+  // of expecting an already-resolved link here.
+  if ((body.sourceKind === "magnet" || body.sourceKind === "debrid") && !body.sourceUrl.startsWith("magnet:")) {
+    return "sourceUrl must be a magnet: URI when sourceKind is 'magnet' or 'debrid'";
+  }
   return null;
 }
 
