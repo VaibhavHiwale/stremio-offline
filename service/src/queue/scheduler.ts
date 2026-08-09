@@ -1,12 +1,15 @@
 import type { Database } from "better-sqlite3";
 import { getPausedForNetworkLoss, getQueuedRows, markQueued, type QueueRow } from "../db/downloadItems.js";
 import { getMaxConcurrentDownloads } from "../db/settings.js";
+import { recordError } from "../observability/errorLog.js";
 import { sleep } from "../util/backoff.js";
 import { processItem, type RunnerDeps } from "./runner.js";
 
 export interface SchedulerDeps {
   db: Database;
   storageRoot: string;
+  /** For correlating error records — defaults to "unknown" so tests don't need to supply one. */
+  installIdHash?: string;
   fetchImpl?: typeof fetch;
   /** Cap on retry backoff — overridable so tests don't wait 5 real minutes. */
   backoffCapMs?: number;
@@ -45,7 +48,13 @@ export function startScheduler(deps: SchedulerDeps): SchedulerHandle {
     if (deps.backoffCapMs !== undefined) runnerDeps.backoffCapMs = deps.backoffCapMs;
 
     const job = processItem(runnerDeps, row)
-      .catch(() => undefined)
+      .catch((err: unknown) => {
+        // An *unexpected* exception from processItem — every anticipated
+        // failure mode already resolves normally (markFailed/markPaused/
+        // etc.); this only fires for genuine bugs (a resolver throwing
+        // instead of returning an error outcome, a DB write failure, ...).
+        recordError(deps.storageRoot, "scheduler", err, { installIdHash: deps.installIdHash ?? "unknown" });
+      })
       .finally(() => {
         inFlight.delete(row.id);
         rowControllers.delete(row.id);

@@ -8,6 +8,7 @@ import { decideRemuxPlan } from "../media/decision.js";
 import { probeFile } from "../media/probe.js";
 import { runFfmpeg } from "../media/remux.js";
 import { verifyRemuxOutput } from "../media/verify.js";
+import { recordError } from "../observability/errorLog.js";
 import { computeLibraryPath } from "../storage/libraryPath.js";
 import { remuxTempPath } from "../storage/paths.js";
 import { fetchSubtitlesForItem } from "../subtitles/fetchForItem.js";
@@ -22,6 +23,8 @@ export interface RemuxRunnerDeps {
   /** Injectable for tests — subtitles (P7) default to the real OpenSubtitles API. */
   subtitlesBaseUrl?: string;
   fetchImpl?: typeof fetch;
+  /** For correlating error records — defaults to "unknown" so tests don't need to supply one. */
+  installIdHash?: string;
   signal?: AbortSignal;
 }
 
@@ -43,8 +46,11 @@ async function fetchSubtitlesBestEffort(deps: RemuxRunnerDeps, row: QueueRow, vi
   try {
     const results = await fetchSubtitlesForItem(videoPath, row.stremioId, langs, subtitleDeps);
     for (const { lang } of results) addSubtitleLang(deps.db, row.id, lang);
-  } catch {
-    // Best-effort — never fail a ready download over a subtitle problem.
+  } catch (err) {
+    // Best-effort — never fail a ready download over a subtitle problem —
+    // but still worth recording so a persistently broken key/quota shows
+    // up in the weekly rollup instead of silently doing nothing forever.
+    recordError(deps.storageRoot, "subtitles", err, { installIdHash: deps.installIdHash ?? "unknown" });
   }
 }
 
@@ -152,8 +158,14 @@ export function startRemuxRunner(
         if (deps.ffprobePath) jobDeps.ffprobePath = deps.ffprobePath;
         if (deps.subtitlesBaseUrl) jobDeps.subtitlesBaseUrl = deps.subtitlesBaseUrl;
         if (deps.fetchImpl) jobDeps.fetchImpl = deps.fetchImpl;
+        if (deps.installIdHash) jobDeps.installIdHash = deps.installIdHash;
         const job = processRemuxRow(jobDeps, row)
-          .catch(() => undefined)
+          .catch((err: unknown) => {
+            // An unexpected exception, not one of processRemuxRow's own
+            // handled failure paths (those already call markFailed and
+            // return normally) — see the matching note in scheduler.ts.
+            recordError(deps.storageRoot, "remuxRunner", err, { installIdHash: deps.installIdHash ?? "unknown" });
+          })
           .finally(() => {
             inFlight.delete(row.id);
             rowControllers.delete(row.id);
