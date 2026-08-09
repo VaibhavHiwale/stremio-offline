@@ -4,7 +4,7 @@ import { buildApp } from "./app.js";
 import { closeDb, openDb } from "./db/client.js";
 import { reconcile } from "./queue/reconcile.js";
 import { startRemuxRunner } from "./queue/remuxRunner.js";
-import { startQueueRunner } from "./queue/runner.js";
+import { startScheduler } from "./queue/scheduler.js";
 import { acquireHttpsTransport } from "./transport/certManager.js";
 import { loadOrCreateSecret } from "./transport/secretStore.js";
 
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const queueRunner = startQueueRunner({ db, storageRoot: STORAGE_ROOT });
+  const scheduler = startScheduler({ db, storageRoot: STORAGE_ROOT });
   const remuxRunner = startRemuxRunner({ db, storageRoot: STORAGE_ROOT });
 
   let certStatus: SubsystemStatus = "down";
@@ -55,6 +55,8 @@ async function main(): Promise<void> {
     db,
     storageRoot: STORAGE_ROOT,
     fileTokenSecret,
+    scheduler,
+    remuxRunner,
     configuredBaseUrl: PUBLIC_BASE_URL,
     getCertInfo,
     logger: loggerOptions,
@@ -92,6 +94,8 @@ async function main(): Promise<void> {
       db,
       storageRoot: STORAGE_ROOT,
       fileTokenSecret,
+      scheduler,
+      remuxRunner,
       configuredBaseUrl: PUBLIC_BASE_URL ?? `https://${transport.domain}:${HTTPS_PORT}`,
       getCertInfo,
       logger: loggerOptions,
@@ -109,7 +113,7 @@ async function main(): Promise<void> {
       // writing to its .part file until its current chunk finishes, which is
       // safe to interrupt at any point — the next boot's reconciliation
       // picks up wherever it left off.
-      await queueRunner.stop();
+      await scheduler.stop();
       await remuxRunner.stop();
       await httpApp.close();
       if (httpsApp) await httpsApp.close();

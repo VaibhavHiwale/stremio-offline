@@ -81,6 +81,10 @@ export async function processRemuxRow(deps: RemuxRunnerDeps, row: QueueRow): Pro
 
 export interface RemuxRunnerHandle {
   stop: () => Promise<void>;
+  /** Aborts (kills the ffmpeg process for) the in-flight remux for this row, if one is running here — used by DELETE /downloads/:id while remuxing. Returns whether a job was actually found. */
+  abortRow: (id: string) => boolean;
+  /** Currently-remuxing count — feeds /health's activeJobs. */
+  activeCount: () => number;
 }
 
 function defaultConcurrency(): number {
@@ -94,9 +98,14 @@ export function startRemuxRunner(
   const semaphore = new Semaphore(deps.concurrency ?? defaultConcurrency());
   const inFlight = new Set<string>();
   const pending = new Set<Promise<void>>();
+  // Per-row, not pool-wide — P5 needs to cancel one row's ffmpeg process
+  // (a delete mid-remux) without disturbing other concurrent remuxes.
+  const rowControllers = new Map<string, AbortController>();
   let stopped = false;
-  const abortController = new AbortController();
-  deps.signal?.addEventListener("abort", () => abortController.abort());
+
+  deps.signal?.addEventListener("abort", () => {
+    for (const controller of rowControllers.values()) controller.abort();
+  });
 
   const loop = async (): Promise<void> => {
     while (!stopped) {
@@ -106,11 +115,16 @@ export function startRemuxRunner(
         if (stopped) break;
         inFlight.add(row.id);
         const release = await semaphore.acquire();
-        const jobDeps: RemuxRunnerDeps = { ...deps, signal: abortController.signal };
+        const controller = new AbortController();
+        rowControllers.set(row.id, controller);
+        const jobDeps: RemuxRunnerDeps = { db: deps.db, storageRoot: deps.storageRoot, signal: controller.signal };
+        if (deps.ffmpegPath) jobDeps.ffmpegPath = deps.ffmpegPath;
+        if (deps.ffprobePath) jobDeps.ffprobePath = deps.ffprobePath;
         const job = processRemuxRow(jobDeps, row)
           .catch(() => undefined)
           .finally(() => {
             inFlight.delete(row.id);
+            rowControllers.delete(row.id);
             pending.delete(job);
             release();
           });
@@ -126,9 +140,16 @@ export function startRemuxRunner(
   return {
     stop: async () => {
       stopped = true;
-      abortController.abort();
+      for (const controller of rowControllers.values()) controller.abort();
       await iteration;
       await Promise.allSettled([...pending]);
     },
+    abortRow: (id: string): boolean => {
+      const controller = rowControllers.get(id);
+      if (!controller) return false;
+      controller.abort();
+      return true;
+    },
+    activeCount: () => inFlight.size,
   };
 }

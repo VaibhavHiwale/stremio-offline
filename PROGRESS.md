@@ -13,8 +13,8 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P1 Transport | ✅ done, pushed | commit `2969465` — cert-API path implemented; Tailscale/Cloudflare stubbed (not chosen) |
 | P2 Addon surface | ✅ done, pushed | commit `c719db4` |
 | P3 Download core | ✅ done, pushed | commit `1be957a` |
-| P4 Remux pipeline | ✅ done, pushed | commit `48d499f` — see below |
-| P5 Queue | not started | |
+| P4 Remux pipeline | ✅ done, pushed | commit `48d499f` |
+| P5 Queue | ✅ done, **not yet pushed** | see below |
 | P6 Resolvers | not started | |
 | P7 Subtitles | not started | |
 | P8 Storage | not started | |
@@ -28,87 +28,129 @@ P0–P4 work is committed locally (P4 landed via a squash-merge from
 typecheck — that branch can be deleted now). **Confirm what's actually pushed
 with `git log origin/master..master` before assuming parity with GitHub.**
 
-## P4 — Remux pipeline: done
+## P4 — Remux pipeline: done (condensed; full detail in commit `48d499f`)
+
+ffprobe-driven copy-vs-transcode decision, ffmpeg execution, post-remux
+verification (duration within 1%, stream presence), atomic publish into the
+Movies/Series library layout, background worker pool bounded by
+`min(2, cpus-1)`. Ready rows expose both a web-ready MP4 stream and an
+"Original quality (needs streaming server)" second entry
+(`?variant=original` on `/files/:id`). All synthetic-fixture tests (no real
+media files anywhere in the suite) plus a real end-to-end run against the
+live service. Deferred: real device playback (needs the acceptance matrix
+on the actual deployment target, not this Windows dev machine); Windows
+`SIGTERM` timing is still unverified (`Stop-Process` isn't real POSIX
+`SIGTERM`) — carries forward from P3.
+
+## P5 — Queue: done
 
 ### Built
-- `service/src/media/probe.ts` — ffprobe wrapper (codecs, duration, pixel format)
-- `service/src/media/decision.ts` — copy-remux vs full-transcode decision (binary,
-  per spec: H.264/AAC → copy; anything else → transcode both streams)
-- `service/src/media/remux.ts` — ffmpeg execution (copy or transcode args)
-- `service/src/media/verify.ts` — extended with `verifyRemuxOutput` (post-remux
-  duration-within-1%, video+audio stream presence, non-zero size)
-- `service/src/storage/libraryPath.ts` — Movies/Series library layout + filename
-  sanitization
-- `service/src/storage/paths.ts` — added `remuxTempPath`
-- `service/src/queue/semaphore.ts` — generic counting semaphore
-- `service/src/queue/remuxRunner.ts` — `processRemuxRow` (single-row, testable) +
-  `startRemuxRunner` (background worker pool bounded by the semaphore,
-  `min(2, cpus-1)` default concurrency), wired into `service/src/index.ts`
-  alongside the download `startQueueRunner`, with the same `stop()` on
-  SIGTERM/SIGINT graceful-shutdown pattern.
-- `service/src/db/downloadItems.ts` — added `markReady`; extended `QueueRow` /
-  `ROW_COLUMNS` with `type, title, year, season, episode`.
-- `service/src/api/health.ts`'s `checkFfmpeg` now spawns the bundled
-  `ffmpeg-static` / `@ffprobe-installer/ffprobe` binaries directly instead of
-  assuming a system PATH `ffmpeg` (CLAUDE.md §5).
-- Rule 1's "second entry" — ready rows now return **two** stream entries:
-  the web-ready MP4 (`▶️ Play offline · <quality>`) and, when a
-  `file_path_original` exists, `Original quality (needs streaming server)`
-  with `behaviorHints.notWebReady: true`. Plumbing: `addon/src/repository.ts`
-  exposes `filePathOriginal`; `addon/src/handlers/stream.ts` builds both
-  entries; `service/src/api/files.ts` gained a `?variant=original` query
-  param (same signed token covers either variant — both files belong to the
-  one authorized download item) with the correct content-type
-  (`application/octet-stream`, not `video/mp4`, since the original container
-  isn't guaranteed to be MP4); `service/src/app.ts` wires a second
-  `buildOriginalFileUrl`.
-- Dependencies: `ffmpeg-static`, `@ffprobe-installer/ffprobe` — both resolve
-  and run correctly on this (Windows) machine; ffmpeg has `libx264`, `aac`,
-  `libx265`/`hevc` encoders available, used to generate synthetic test
-  fixtures via `-f lavfi` (no real media files needed anywhere in the suite).
+- `service/src/queue/scheduler.ts` — `startScheduler()`, the real concurrent
+  processor CLAUDE.md §10 calls for. Reuses `processItem()` (exported from
+  `runner.ts`, P3) so crash-safety/resume logic isn't duplicated — this only
+  adds running several rows at once. Concurrency is `settings.max_concurrent_downloads`,
+  **read live every poll** (no restart needed once a `/settings` PATCH
+  endpoint exists — not built yet, direct SQL only). Priority ordering
+  reuses `getQueuedRows`' `ORDER BY priority DESC, added_at ASC`. Each
+  in-flight row gets its own `AbortController` (not one pool-wide signal),
+  enabling `abortRow(id)` — used by both PATCH `.../pause` and DELETE.
+  `runner.ts`'s old single-lane `startQueueRunner`/`QueueRunnerHandle` were
+  deleted (fully superseded); `step()`/`processItem()` stay, since P3's
+  chaos tests still drive `step()` directly.
+- `service/src/queue/remuxRunner.ts` — same per-row-`AbortController`
+  treatment (was one pool-wide controller) so DELETE mid-remux can kill just
+  that row's ffmpeg process without disturbing other concurrent remuxes.
+  Both `SchedulerHandle` and `RemuxRunnerHandle` gained `abortRow()` and
+  `activeCount()` (the latter now feeds `/health`'s real `activeJobs`,
+  previously hardcoded `0`).
+- `service/src/db/downloadItems.ts` — `getQueuedRows` (multi-row picker for
+  the scheduler); `pauseDownload`/`resumeDownload`/`retryDownload` (each
+  validates the current status server-side and returns
+  `"ok"|"not-found"|"invalid-state"` — no separate read-then-write race,
+  since better-sqlite3 is synchronous and there's no `await` between the
+  status check and the guarded `UPDATE`); `setPriority`;
+  `cancelOrDeleteDownload` (→ `cancelled` for anything in flight, →
+  `deleted` for a `ready` row, idempotent on repeat calls); `getFullById` /
+  `listAll` returning the complete `DownloadItem` shape for the REST API
+  (JSON/boolean column coercion). **Important guard**: every
+  completion-writing mutation (`markPaused`, `markFailed`, `markReady`,
+  `markAwaitingRemux`, `markQueued`) now has `AND status NOT IN ('cancelled',
+  'deleted')` — without it, a job that was already in flight when the user
+  cancels/deletes it can finish late and resurrect the row. Verified by both
+  a unit test and the E2E run below.
+- `service/src/api/downloads.ts` — `POST/GET/PATCH/DELETE /downloads(/:id)`
+  per CLAUDE.md §8, mounted without the `/:config` prefix (internal
+  management API, not the Stremio addon protocol — same as `/health` and
+  `/files/:id`). `POST` is idempotent by `(stremioId, quality)`: a duplicate
+  enqueue looks the row up by that natural key and returns the *same* job
+  (200) instead of the generated id from the redundant call; a genuinely new
+  job returns 201. `DELETE` cleans up on-disk artifacts
+  (`.part`/`.offline/remux/*.remux.mp4`/original/web-ready) best-effort.
+- `service/src/queue/reconcile.ts` — orphan sweep extended to
+  `.offline/remux/*.remux.mp4` (previously only `.part` files), closing the
+  gap where a hard crash mid-remux (as opposed to a live DELETE, which now
+  kills the ffmpeg process directly) would otherwise leave a staging file
+  behind forever.
+- `shared/types.ts` — **no changes needed**; `DownloadItem`/`Settings`
+  already had every field P5 needed (`priority`, `maxConcurrentDownloads`,
+  etc.) from the original spec.
 
 ### Tests
-- `service/src/testutils/mediaFixtures.ts` — shared helper generating a
-  synthetic H.264/AAC MP4 and an HEVC/AC3 MKV via ffmpeg lavfi sources.
-- `media/decision.test.ts` — pure logic against fake `ProbeResult` objects
-  (copy vs. transcode for every branch: HEVC, 10-bit, non-AAC audio, missing
-  streams).
-- `media/probe.test.ts` — probes both synthetic fixtures, asserts real
-  codec/duration detection (not extension-guessing).
-- `media/remux.test.ts` — runs `runFfmpeg` for both plans end-to-end plus a
-  nonexistent-input failure case.
-- `queue/remuxRunner.test.ts` — integration test via `processRemuxRow`:
-  copy-remux path lands in the library (not the `.offline/remux/` staging
-  dir, which is gone after the atomic rename), transcode path converts
-  HEVC/AC3 → H.264/AAC, a corrupted/truncated input fails cleanly (row →
-  `failed`, nothing written to the library path), and a row missing
-  `file_path_original` fails immediately without touching ffmpeg.
-  **Gotcha**: the transcode fixture needs ≥5s duration — at 1s, normal
-  encoder frame-boundary rounding alone can exceed the 1% duration-drift
-  tolerance in `verifyRemuxOutput` and fail the test for a reason that has
-  nothing to do with the code under test.
-- All 53 service tests + 5 addon tests pass (`npm run typecheck` and
-  `npm run build` clean across all three workspaces).
+- `queue/scheduler.test.ts` — concurrency is actually bounded by
+  `settings.max_concurrent_downloads` (a custom slow test server proves
+  *both* that it reaches the limit and never exceeds it, since a
+  same-server-instance approach couldn't observe real parallelism — see the
+  file for why `fakeHttpServer.ts`'s one-shot `sliceDelayMs` doesn't fit
+  this test); priority ordering under constrained concurrency; `abortRow`
+  interrupts an in-flight download cleanly (→ `paused`, not corrupted); and
+  a not-found case.
+- `db/downloadItems.test.ts` — extended with unit tests for every new
+  primitive, including the resurrection-guard test (cancel a row, then call
+  every completion-writer against it, assert none of them can move it off
+  `cancelled`).
+- `api/downloads.test.ts` — full REST surface via Fastify's `.inject()`
+  (no real network listener needed) against fake scheduler/remuxRunner
+  handles, covering the enqueue-idempotency contract, all PATCH actions
+  (including the 409 invalid-state and 404 cases), and DELETE for every
+  status (idempotent re-delete, file cleanup on a `ready` row, `abortRow`
+  called on the correct handle for `downloading` vs `remuxing`).
+- 82 service tests + 5 addon tests pass; `npm run typecheck` / `npm run
+  build` clean across all three workspaces.
 
 ### End-to-end verification performed
-Booted the real service (`SKIP_CERT_ACQUISITION=1`), served a real
-synthetic HEVC/AC3 fixture over a local Range-capable HTTP server, inserted
-a `queued` row directly (no REST enqueue endpoint exists yet — that's P5),
-and confirmed: the row progressed `queued → downloading → remuxing →
-ready`; the final file (ffprobe-verified `h264`/`aac`) landed at the
-computed library path; `GET /stream/movie/:id.json` returned both stream
-entries with the correct `behaviorHints`; `GET /files/:id` served the
-web-ready variant as `video/mp4` and, with `&variant=original`, served the
-raw pre-remux file byte-for-byte identical to what was downloaded. This is
-the ffprobe-level proxy for "plays on device 3/4" from CLAUDE.md §9 — actual
-device playback still needs the real acceptance matrix once this is
-deployed off this dev machine.
+Booted the real service and ran a 16-check script against it over real
+HTTP, using a slow custom file server (real HEVC/AC3 fixture, chunked with
+artificial delay) so pause/resume had a real window to land in:
+`POST /downloads` idempotency (duplicate call returns the same job id);
+`GET /downloads` and `GET /downloads/:id`; pausing a genuinely in-flight
+download via `PATCH .../pause` and confirming it does *not* silently
+auto-resume; `PATCH .../resume` and watching the job complete through the
+full download → remux → ready pipeline afterward; `PATCH` priority;
+`DELETE` on a `ready` job (file actually removed from the library path);
+`DELETE` on a still-`downloading` job (→ `cancelled`, live transfer
+aborted) with a follow-up check that the in-flight job's late completion
+did **not** resurrect it back to `paused`/`ready`. All 16 checks passed.
 
-### Deferred / not done in P4
-- Real device playback testing (needs the acceptance matrix — separate
-  always-on deployment target, not this Windows dev machine).
-- Windows `SIGTERM` graceful-shutdown timing is still unverified (same
-  caveat as P3 — `Stop-Process` in PowerShell isn't real POSIX `SIGTERM`).
+### Deferred / not done in P5
+- `GET|PATCH /settings` REST endpoint — `max_concurrent_downloads` etc. are
+  only reachable by direct SQL right now; the scheduler reads them live, so
+  wiring the endpoint later needs no scheduler changes.
+- `GET /download/:stremioId` (Rule 6's TV-remote trigger + pre-generated
+  confirmation MP4 clip) — genuinely depends on P6 (resolvers): there's no
+  source URL to enqueue from just a `stremioId` until a debrid/magnet
+  resolver exists to produce one.
+- `POST /downloads/:id/progress` (player reports position) — belongs with
+  P11 (resume playback), not queue management.
+- A literal bulk "pause all / resume all" endpoint — CLAUDE.md §8 only
+  lists per-item `PATCH /downloads/:id`; bulk is achievable today by
+  looping that per item, so a dedicated endpoint was skipped as
+  unrequested scope.
+- Live-cancel is per-*row*, not a global "pause the whole queue" flag for
+  disk-full. The existing per-item disk-full pause (P3) already stops all
+  writes once space runs out — every concurrent slot hitting the same
+  `checkDiskSpace` guard pauses itself — so a separate global flag was
+  judged not to add real protection, just another piece of state to keep
+  in sync.
 
 ## Environment / gotchas learned so far (don't rediscover these)
 

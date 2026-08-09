@@ -3,8 +3,11 @@ import { registerAddonRoutes } from "@stremio-offline/addon";
 import type { Database } from "better-sqlite3";
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { buildHealthReport } from "./api/health.js";
+import { registerDownloadsRoutes } from "./api/downloads.js";
 import { buildSignedFileUrl, registerFilesRoute } from "./api/files.js";
 import type { SubsystemStatus } from "@stremio-offline/shared";
+import type { RemuxRunnerHandle } from "./queue/remuxRunner.js";
+import type { SchedulerHandle } from "./queue/scheduler.js";
 import { resolveBaseUrl } from "./transport/baseUrl.js";
 
 const FILE_URL_TTL_SECONDS = 6 * 60 * 60; // long enough for a full movie to buffer/seek around in
@@ -13,6 +16,8 @@ export interface AppDeps {
   db: Database;
   storageRoot: string;
   fileTokenSecret: string;
+  scheduler: SchedulerHandle;
+  remuxRunner: RemuxRunnerHandle;
   /** Explicit override (env PUBLIC_BASE_URL, or the domain from an acquired cert) — see transport/baseUrl.ts. */
   configuredBaseUrl: string | null;
   /** Read live, not snapshotted — cert acquisition finishes after boot. */
@@ -47,7 +52,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     const report = await buildHealthReport({
       db: deps.db,
       storageRoot: deps.storageRoot,
-      activeJobs: 0,
+      activeJobs: deps.scheduler.activeCount() + deps.remuxRunner.activeCount(),
       certStatus: certInfo.status,
       certExpiresAt: certInfo.expiresAt,
       debridStatus: "down",
@@ -56,6 +61,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerFilesRoute(app, { db: deps.db, secret: deps.fileTokenSecret });
+
+  registerDownloadsRoutes(app, {
+    db: deps.db,
+    storageRoot: deps.storageRoot,
+    scheduler: deps.scheduler,
+    remuxRunner: deps.remuxRunner,
+  });
 
   registerAddonRoutes(app, {
     db: deps.db,

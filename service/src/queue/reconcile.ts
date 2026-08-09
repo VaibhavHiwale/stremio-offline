@@ -48,33 +48,50 @@ export async function reconcile(db: Database, storageRoot: string): Promise<Reco
   }
 
   result.orphansDeleted.push(...(await sweepOrphanParts(db, storageRoot)));
+  result.orphansDeleted.push(...(await sweepOrphanRemuxStaging(db, storageRoot)));
 
   return result;
 }
 
-async function sweepOrphanParts(db: Database, storageRoot: string): Promise<string[]> {
-  const partsDir = join(storageRoot, ".offline", "parts");
+async function sweepOrphanFiles(dir: string, suffix: string, activeIds: Set<string>): Promise<string[]> {
   let entries: string[];
   try {
-    entries = await fsp.readdir(partsDir);
+    entries = await fsp.readdir(dir);
   } catch {
     return [];
   }
 
+  const deleted: string[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(suffix)) continue;
+    const id = entry.slice(0, -suffix.length);
+    if (!activeIds.has(id)) {
+      await fsp.rm(join(dir, entry), { force: true });
+      deleted.push(entry);
+    }
+  }
+  return deleted;
+}
+
+async function sweepOrphanParts(db: Database, storageRoot: string): Promise<string[]> {
   const activeIds = new Set(
     (db.prepare("SELECT id FROM download_items WHERE status IN ('queued','downloading','paused')").all() as { id: string }[]).map(
       (r) => r.id,
     ),
   );
+  return sweepOrphanFiles(join(storageRoot, ".offline", "parts"), ".part", activeIds);
+}
 
-  const deleted: string[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".part")) continue;
-    const id = entry.slice(0, -".part".length);
-    if (!activeIds.has(id)) {
-      await fsp.rm(join(partsDir, entry), { force: true });
-      deleted.push(entry);
-    }
-  }
-  return deleted;
+/**
+ * `.offline/remux/<id>.remux.mp4` staging files — CLAUDE.md §4 "Orphan
+ * sweep on boot". A row cancelled/deleted (P5) mid-remux gets its ffmpeg
+ * process killed live via RemuxRunnerHandle.abortRow(), but this covers the
+ * case where the whole process died instead (crash, kill -9) before that
+ * could happen.
+ */
+async function sweepOrphanRemuxStaging(db: Database, storageRoot: string): Promise<string[]> {
+  const activeIds = new Set(
+    (db.prepare("SELECT id FROM download_items WHERE status = 'remuxing'").all() as { id: string }[]).map((r) => r.id),
+  );
+  return sweepOrphanFiles(join(storageRoot, ".offline", "remux"), ".remux.mp4", activeIds);
 }

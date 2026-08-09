@@ -34,10 +34,11 @@ export interface RunnerDeps {
 export type StepResult = "processed" | "resumed-paused" | "idle";
 
 /**
- * Runs exactly one unit of queue work. Deliberately not a scheduler — one
- * lane, no priority weighting, no concurrency semaphore. That's P5's job;
- * this exists so P3's chaos tests (resume, disk-full pause, network-loss
- * pause, reconciliation) have something real to drive.
+ * Runs exactly one unit of queue work, single-lane. Superseded in
+ * production by queue/scheduler.ts's concurrent pool (P5), which reuses
+ * processItem() below; this stays so P3's chaos tests (resume, disk-full
+ * pause, network-loss pause, reconciliation) have a simple, deterministic
+ * driver.
  */
 export async function step(deps: RunnerDeps): Promise<StepResult> {
   const paused = getPausedForNetworkLoss(deps.db);
@@ -53,7 +54,8 @@ export async function step(deps: RunnerDeps): Promise<StepResult> {
   return "processed";
 }
 
-async function processItem(deps: RunnerDeps, row: QueueRow): Promise<void> {
+/** Exported so queue/scheduler.ts (P5) can drive many of these concurrently instead of one at a time. */
+export async function processItem(deps: RunnerDeps, row: QueueRow): Promise<void> {
   markDownloading(deps.db, row.id);
   const dest = partPath(deps.storageRoot, row.id);
 
@@ -110,39 +112,3 @@ async function processItem(deps: RunnerDeps, row: QueueRow): Promise<void> {
   }
 }
 
-export interface QueueRunnerHandle {
-  stop: () => Promise<void>;
-}
-
-/** Real background loop for production use — index.ts wires this up. Tests drive step() directly instead. */
-export function startQueueRunner(deps: RunnerDeps & { idlePollMs?: number }): QueueRunnerHandle {
-  let stopped = false;
-  const abortController = new AbortController();
-  const loopDeps: RunnerDeps = { ...deps, signal: abortController.signal };
-
-  const loop = async (): Promise<void> => {
-    while (!stopped) {
-      let result: StepResult;
-      try {
-        result = await step(loopDeps);
-      } catch {
-        result = "idle";
-      }
-      if (stopped) return;
-      if (result === "idle") await sleep(deps.idlePollMs ?? 5000);
-    }
-  };
-
-  const currentIteration = loop();
-
-  return {
-    stop: async () => {
-      stopped = true;
-      // Interrupts an in-flight download promptly instead of waiting for it
-      // to finish naturally — it's safe to abort at any point, same as a
-      // hard kill; the next boot's reconciliation resumes it correctly.
-      abortController.abort();
-      await currentIteration;
-    },
-  };
-}
