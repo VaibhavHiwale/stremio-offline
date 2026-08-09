@@ -19,7 +19,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P7 Subtitles | ✅ done, pushed | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
 | P8 Storage | ✅ done, pushed | commit `98022a1` — see below, fully verified end-to-end, including the real background sweeper |
 | P9 Progress + dashboard | ✅ done, pushed | commit `e6557b7` — real E2E caught and fixed a genuine WS registration bug that unit tests alone missed |
-| P10 Episode auto-download | ✅ done, **not yet pushed** | see below — real E2E against a fake local source addon, full download→remux→ready→auto-enqueue chain |
+| P10 Episode auto-download | ✅ done, pushed | commit `96e337c` — real E2E against a fake local source addon, full download→remux→ready→auto-enqueue chain |
 | P11 Resume playback | not started | |
 
 Repo: https://github.com/VaibhavHiwale/stremio-offline (remote `origin`, branch `master`).
