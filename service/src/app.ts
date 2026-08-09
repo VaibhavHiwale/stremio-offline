@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import { registerAddonRoutes } from "@stremio-offline/addon";
 import type { Database } from "better-sqlite3";
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
+import { registerAddonsRoutes } from "./api/addons.js";
 import { registerDashboardStatic } from "./api/dashboardStatic.js";
 import { registerDebridAccountsRoutes } from "./api/debridAccounts.js";
 import { registerDiagnosticsRoutes } from "./api/diagnostics.js";
@@ -87,6 +88,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerDebridAccountsRoutes(app, { db: deps.db });
+
+  registerAddonsRoutes(app, { db: deps.db });
 
   const safeResolveBaseUrl = (req: FastifyRequest): string | null => {
     try {

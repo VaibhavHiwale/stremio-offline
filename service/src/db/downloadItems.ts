@@ -4,6 +4,7 @@ import type { Database } from "better-sqlite3";
 export interface QueueRow {
   id: string;
   stremioId: string;
+  seriesId: string | null;
   type: "movie" | "series";
   title: string;
   year: number | null;
@@ -24,7 +25,7 @@ export interface QueueRow {
 }
 
 const ROW_COLUMNS = `
-  id, stremio_id AS stremioId, type, title, year, season, episode,
+  id, stremio_id AS stremioId, series_id AS seriesId, type, title, year, season, episode,
   quality, source_kind AS sourceKind, source_url AS sourceUrl,
   source_etag AS sourceEtag, status, bytes_downloaded AS bytesDownloaded, bytes_total AS bytesTotal,
   storage_target_id AS storageTargetId, file_path_original AS filePathOriginal,
@@ -150,6 +151,11 @@ export function getAutoDeleteCandidates(db: Database): AutoDeleteCandidate[] {
          )`,
     )
     .all() as AutoDeleteCandidate[];
+}
+
+/** Any row at all for this stremioId, regardless of quality/status — used by P10's auto-download to avoid re-triggering an episode that's already queued, downloading, ready, or even failed (a failed auto-enqueue shouldn't retry itself forever on every subsequent episode completion; the user can still retry it manually via PATCH). */
+export function existsByStremioId(db: Database, stremioId: string): boolean {
+  return db.prepare("SELECT 1 FROM download_items WHERE stremio_id = ? LIMIT 1").get(stremioId) !== undefined;
 }
 
 /** Idempotent by (stremio_id, quality) — the schema's UNIQUE constraint makes a duplicate enqueue a no-op. */

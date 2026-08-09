@@ -31,6 +31,16 @@ export interface DebridAccount {
 
 export type ContentType = "movie" | "series";
 
+// --- Source addons (P10) ----------------------------------------------------
+
+/** A user-registered Stremio addon queried server-side for streams — CLAUDE.md §8 `GET|POST /addons`. */
+export interface SourceAddon {
+  id: string;
+  manifestUrl: string;
+  name: string;
+  addedAt: string;
+}
+
 export interface DownloadItem {
   id: string;
   stremioId: string; // "tt0903747:1:1"

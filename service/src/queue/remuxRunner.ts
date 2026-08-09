@@ -9,6 +9,7 @@ import { probeFile } from "../media/probe.js";
 import { runFfmpeg } from "../media/remux.js";
 import { verifyRemuxOutput } from "../media/verify.js";
 import { recordError } from "../observability/errorLog.js";
+import { triggerAutoDownloadNextEpisodes } from "./autoDownload.js";
 import { computeLibraryPath } from "../storage/libraryPath.js";
 import { remuxTempPath } from "../storage/paths.js";
 import { fetchSubtitlesForItem } from "../subtitles/fetchForItem.js";
@@ -113,6 +114,19 @@ export async function processRemuxRow(deps: RemuxRunnerDeps, row: QueueRow): Pro
   markReady(deps.db, row.id, { filePathWebReady: finalPath });
 
   await fetchSubtitlesBestEffort(deps, row, finalPath);
+  await triggerAutoDownloadNextEpisodeBestEffort(deps, row);
+}
+
+/**
+ * Best-effort next-episode auto-download — CLAUDE.md §1/§10 P10. Wrapped
+ * the same way fetchSubtitlesBestEffort is: any failure is recorded, never
+ * propagated, and never affects the episode that just became `ready`.
+ */
+async function triggerAutoDownloadNextEpisodeBestEffort(deps: RemuxRunnerDeps, row: QueueRow): Promise<void> {
+  const autoDownloadDeps: Parameters<typeof triggerAutoDownloadNextEpisodes>[0] = { db: deps.db, storageRoot: deps.storageRoot };
+  if (deps.fetchImpl) autoDownloadDeps.fetchImpl = deps.fetchImpl;
+  if (deps.installIdHash) autoDownloadDeps.installIdHash = deps.installIdHash;
+  await triggerAutoDownloadNextEpisodes(autoDownloadDeps, row);
 }
 
 export interface RemuxRunnerHandle {

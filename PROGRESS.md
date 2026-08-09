@@ -18,8 +18,8 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P6 Resolvers | ✅ done, pushed | commit `30ae4b4` — **unverified against real debrid APIs**, see below |
 | P7 Subtitles | ✅ done, pushed | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
 | P8 Storage | ✅ done, pushed | commit `98022a1` — see below, fully verified end-to-end, including the real background sweeper |
-| P9 Progress + dashboard | ✅ done, **not yet pushed** | see below — real E2E caught and fixed a genuine WS registration bug that unit tests alone missed |
-| P10 Episode auto-download | not started | |
+| P9 Progress + dashboard | ✅ done, pushed | commit `e6557b7` — real E2E caught and fixed a genuine WS registration bug that unit tests alone missed |
+| P10 Episode auto-download | ✅ done, **not yet pushed** | see below — real E2E against a fake local source addon, full download→remux→ready→auto-enqueue chain |
 | P11 Resume playback | not started | |
 
 Repo: https://github.com/VaibhavHiwale/stremio-offline (remote `origin`, branch `master`).
@@ -450,6 +450,143 @@ after it. All checks passed.
   `127.0.0.1:11470` (the plain-HTTP localhost listener) hardcoded — fine
   for local development against a service running with default ports,
   not configurable yet.
+
+## P10 — Episode auto-download: done, verified against a real fake source addon over real HTTP
+
+CLAUDE.md §10 names this exactly: "`addonClient.ts` queries registered
+source addons server-side for the next N episodes. Superset of P6." P6's
+own PROGRESS.md entry already flagged the gap this closes: *"today
+`magnet`/`debrid` enqueues need a magnet URI supplied directly"* — nothing
+in this codebase could go from "a series episode finished" to "here's a
+real magnet for the next one" until now.
+
+### Built
+
+- `shared/types.ts` — added `SourceAddon` (id, manifestUrl, name, addedAt).
+  `schema.sql`'s `source_addons` table has existed since P0 but was
+  completely unused until now — same shape as P8's `storage_targets` before
+  that phase wired it up.
+- `db/sourceAddons.ts` — list/insert/get-by-url/delete. Idempotent by
+  `manifest_url` (schema `UNIQUE`) — re-registering an addon already known
+  is a no-op, first registration wins (doesn't silently rename it).
+- `api/addons.ts` — `GET|POST /addons` (CLAUDE.md §8, exactly as spec'd, no
+  extra scope). `POST` fetches the manifest for real before saving anything
+  (`resolvers/addonClient.ts:fetchAddonManifestInfo`) and rejects with `422`
+  if it's unreachable or doesn't declare the `stream` resource — better to
+  fail at registration time than silently have a dead addon in the list
+  that auto-download queries forever for nothing. No `DELETE /addons` —
+  CLAUDE.md §8 doesn't list one; same precedent as P8's storage-targets
+  deferral, trivial to add later matching `DELETE /debrid-accounts/:service`.
+- `resolvers/addonClient.ts` — the module CLAUDE.md names directly.
+  `fetchStreamsFromAddon`/`fetchSeriesVideos` query an arbitrary third-party
+  addon's `/stream/:type/:id.json` and `/meta/series/:imdbId.json`; both
+  **never throw** (return `[]`/`null` on any failure) — one broken or
+  unreachable addon must not block others being queried for the same
+  episode. `resolveStreamSource` converts one external stream entry (which
+  may carry a direct `url`, a `magnet:` `url`, or a torrent `infoHash` +
+  tracker `sources`) into a `{sourceKind: "http"|"magnet", sourceUrl,
+  quality}` the DB layer can use — `guessQuality` regexes the stream's
+  name/title for a quality tag, falling back to `"original"` (meaning
+  *unknown*, not literally source-master quality) when none is found, which
+  is common for addons that don't tag quality in their titles.
+- `queue/autoDownload.ts` — `triggerAutoDownloadNextEpisodes`, the
+  orchestration CLAUDE.md's "the four complaints" names directly: "auto-
+  download the next episode while binge-watching." For a completed series
+  episode, `findNextEpisodeTargets` tries each registered addon's `meta`
+  resource first (correctly crosses season boundaries via the real
+  `videos` list, sorted and indexed by the current episode) and only falls
+  back to a naive same-season `episode + 1..N` increment if **no**
+  registered addon implements `meta` for that series (many stream-only
+  addons like Torrentio don't) — documented as a real limitation below, not
+  silently papered over. For each target episode, queries registered
+  addons in registration order for the first usable stream matching
+  `settings.defaultQuality` (falling back to an unknown-quality stream
+  rather than skipping the episode outright), and enqueues via the same
+  `enqueueDownload` DB primitive `POST /downloads` uses — `sourceKind`
+  upgrades from `"magnet"` to `"debrid"` when a debrid account is
+  configured (CLAUDE.md §3 Rule 7), exactly mirroring `queue/runner.ts`'s
+  existing handling of both. Wrapped end-to-end in one `try/catch` (see the
+  gotcha below) and recorded via `recordError` on any failure — best-effort,
+  the pattern P7's `fetchSubtitlesBestEffort` established: never affects
+  the episode that just became `ready`.
+- `db/downloadItems.ts` — `QueueRow` gained `seriesId` (needed by the
+  trigger to group new episode rows under the same series; previously only
+  the full-shape `DownloadItem` read carried it). New
+  `existsByStremioId` — the idempotency check: an episode already
+  queued/downloading/ready/**failed** is never re-triggered. A failed
+  auto-enqueue is deliberately left for a manual retry rather than being
+  re-attempted on every subsequent episode completion, which would otherwise
+  hammer a broken/misconfigured addon indefinitely.
+- `queue/remuxRunner.ts` — calls the new trigger right after `markReady`,
+  alongside the existing P7 subtitle fetch — same best-effort wrapping
+  pattern, same call site, both non-blocking of the `ready` status.
+
+### Gotcha (small, but worth flagging): a best-effort function's `try` must wrap the *entire* body
+
+Writing the "never throws" test for `triggerAutoDownloadNextEpisodes`
+caught a real bug in the first draft: `getSettings(deps.db)` was called
+**before** the `try` block (to early-return if auto-download is disabled
+without doing any other work). That's a reasonable-looking optimization
+that quietly breaks the exact guarantee this function exists to provide —
+a DB failure on that one call would propagate uncaught, right past the
+best-effort framing, into `remuxRunner.ts`'s caller. Fixed by moving the
+settings read inside the `try`. **Lesson**: for a "never throws,
+best-effort" function, put the entire body in the `try` — including the
+part that looks like a cheap, can't-fail early exit — or write a test that
+forces that exact call to fail and assert the function still resolves.
+
+### Tests
+39 new (276 service + 10 addon total): `db/sourceAddons.test.ts`,
+`resolvers/addonClient.test.ts` (manifest validation, stream/meta
+fetching's never-throws contract, magnet construction from `infoHash` +
+trackers, quality guessing); `api/addons.test.ts`; `queue/autoDownload.test.ts`
+— the most important cases: next-episode targets via a fake addon's real
+`meta` videos list vs. the same-season-fallback path when no addon
+implements `meta`; an episode with no matching stream on any addon is
+skipped, not a failure; an already-existing row (any status, including
+`failed`) short-circuits before even querying for streams; `sourceKind`
+correctly upgrades to `debrid` when an account is configured; and the
+never-throws case described in the gotcha above.
+
+### End-to-end verification performed
+Booted the real compiled service and a **real local HTTP server** playing
+the role of a third-party source addon (serving a real `manifest.json`,
+`meta/series/:id.json` with a two-episode `videos` list, and
+`stream/series/:id.json` with a torrent `infoHash`) plus a real static
+`video.mp4` file — nothing mocked or in-process. Registered the fake addon
+via `POST /addons` (and confirmed an unreachable manifest URL correctly
+`422`s), enabled auto-download via `PATCH /settings`, then `POST
+/downloads`'d episode 1 and let it run the **entire real pipeline**:
+download → remux → verify → publish. Once episode 1 reached `ready`,
+polled `GET /downloads` and confirmed episode 2 appeared automatically —
+correct season/episode, quality matching `settings.defaultQuality`,
+`sourceKind: "magnet"` (no debrid account configured in this run), and a
+real magnet URI built from the fake addon's `infoHash`. All 12 checks
+passed.
+
+### Deferred / not done in P10
+
+- Season-boundary crossing only works when a registered addon implements
+  the `meta` resource for the series — see the gotcha-adjacent note above
+  in "Built". Many popular stream-only addons don't; Cinemeta does, so
+  registering it alongside a stream addon is the practical workaround, not
+  yet automated (no addon is auto-registered by default).
+- No `wifiOnly` gating on auto-download — CLAUDE.md's locked-in deployment
+  decision (§2) means "Wi-Fi-only" is evaluated against the *server's* own
+  interface, which for an always-on wired NAS/Pi is essentially always
+  "connected"; wiring the check through was judged not worth the code for
+  a setting that can't meaningfully differ in this deployment model.
+- Quality selection is single-shot per addon (first usable stream matching
+  `settings.defaultQuality`, else first unknown-quality stream) — doesn't
+  rank across *all* addons' candidates by quality/seeder-count/etc. the way
+  a human manually picking a stream might; reasonable for an unattended
+  background trigger, not a substitute for the (still-unbuilt) manual
+  `GET /resolve?stremioId=&type=` browsing endpoint CLAUDE.md §8 also
+  lists.
+- `GET /resolve?stremioId=&type=` itself is still not built — P10's
+  CLAUDE.md description scopes it specifically to auto-download, not to a
+  manual "browse available sources" flow. `resolvers/addonClient.ts` is
+  already the right module to build that on top of when it's needed.
 
 ## Environment / gotchas learned so far (don't rediscover these)
 
