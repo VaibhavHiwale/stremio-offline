@@ -20,7 +20,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P8 Storage | ✅ done, pushed | commit `98022a1` — see below, fully verified end-to-end, including the real background sweeper |
 | P9 Progress + dashboard | ✅ done, pushed | commit `e6557b7` — real E2E caught and fixed a genuine WS registration bug that unit tests alone missed |
 | P10 Episode auto-download | ✅ done, pushed | commit `96e337c` — real E2E against a fake local source addon, full download→remux→ready→auto-enqueue chain |
-| P11 Resume playback | ✅ done, **not yet pushed** | see below — `videoHash`/`videoSize`/real `filename` in `behaviorHints`, plus `POST /downloads/:id/progress` |
+| P11 Resume playback | ✅ done, pushed | commit `a555ebb` — `videoHash`/`videoSize`/real `filename` in `behaviorHints`, plus `POST /downloads/:id/progress` |
 
 Repo: https://github.com/VaibhavHiwale/stremio-offline (remote `origin`, branch `master`).
 P0–P4 work is committed locally (P4 landed via a squash-merge from
