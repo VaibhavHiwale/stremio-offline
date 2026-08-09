@@ -71,9 +71,19 @@ function buildMultipartByterangesStream(
   return output;
 }
 
-export function buildSignedFileUrl(baseUrl: string, secret: string, id: string, ttlSeconds: number): string {
+export type FileVariant = "web-ready" | "original";
+
+/** The variant isn't part of the signed token — both files belong to the same authorized download item, so one token covers either. */
+export function buildSignedFileUrl(
+  baseUrl: string,
+  secret: string,
+  id: string,
+  ttlSeconds: number,
+  variant: FileVariant = "web-ready",
+): string {
   const { token, expiresAt } = signFileToken(secret, id, ttlSeconds);
-  return `${baseUrl}/files/${encodeURIComponent(id)}?t=${token}&exp=${expiresAt}`;
+  const variantParam = variant === "original" ? "&variant=original" : "";
+  return `${baseUrl}/files/${encodeURIComponent(id)}?t=${token}&exp=${expiresAt}${variantParam}`;
 }
 
 export interface FilesRouteDeps {
@@ -88,11 +98,11 @@ export interface FilesRouteDeps {
  * hand-placed MP4, and P2's catalog/stream handlers reuse the same table.
  */
 export function registerFilesRoute(app: FastifyInstance, deps: FilesRouteDeps): void {
-  app.get<{ Params: { id: string }; Querystring: { t?: string; exp?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { t?: string; exp?: string; variant?: string } }>(
     "/files/:id",
     async (req, reply) => {
       const { id } = req.params;
-      const { t, exp } = req.query;
+      const { t, exp, variant } = req.query;
       const expiresAt = Number(exp);
 
       if (!t || !exp || !verifyFileToken(deps.secret, id, expiresAt, t)) {
@@ -100,16 +110,24 @@ export function registerFilesRoute(app: FastifyInstance, deps: FilesRouteDeps): 
       }
 
       const row = deps.db
-        .prepare("SELECT file_path_web_ready AS filePath, status FROM download_items WHERE id = ?")
-        .get(id) as { filePath: string | null; status: string } | undefined;
+        .prepare(
+          "SELECT file_path_web_ready AS filePathWebReady, file_path_original AS filePathOriginal, status FROM download_items WHERE id = ?",
+        )
+        .get(id) as { filePathWebReady: string | null; filePathOriginal: string | null; status: string } | undefined;
 
-      if (!row || row.status !== "ready" || !row.filePath) {
+      const filePath = variant === "original" ? row?.filePathOriginal : row?.filePathWebReady;
+
+      if (!row || row.status !== "ready" || !filePath) {
         return reply.code(404).send({ error: "not found" });
       }
 
+      // web-ready is always MP4 (CLAUDE.md §3 Rule 1); original may be any
+      // container, so don't claim a video/mp4 content type for it.
+      const contentType = variant === "original" ? "application/octet-stream" : "video/mp4";
+
       let size: number;
       try {
-        size = statSync(row.filePath).size;
+        size = statSync(filePath).size;
       } catch {
         return reply.code(404).send({ error: "file missing on disk" });
       }
@@ -119,12 +137,12 @@ export function registerFilesRoute(app: FastifyInstance, deps: FilesRouteDeps): 
       const rangeHeader = req.headers.range;
       if (!rangeHeader) {
         reply.code(200);
-        reply.header("Content-Type", "video/mp4");
+        reply.header("Content-Type", contentType);
         reply.header("Content-Length", size);
         // Streaming replies MUST be returned here — an async handler that calls
         // reply.send(stream) without returning it races its own resolved
         // promise against the in-flight stream and truncates the response.
-        return reply.send(createReadStream(row.filePath));
+        return reply.send(createReadStream(filePath));
       }
 
       const ranges = parseRangeHeader(rangeHeader, size);
@@ -137,16 +155,16 @@ export function registerFilesRoute(app: FastifyInstance, deps: FilesRouteDeps): 
       if (ranges.length === 1) {
         const range = ranges[0]!;
         reply.code(206);
-        reply.header("Content-Type", "video/mp4");
+        reply.header("Content-Type", contentType);
         reply.header("Content-Range", `bytes ${range.start}-${range.end}/${size}`);
         reply.header("Content-Length", range.end - range.start + 1);
-        return reply.send(createReadStream(row.filePath, { start: range.start, end: range.end }));
+        return reply.send(createReadStream(filePath, { start: range.start, end: range.end }));
       }
 
       const boundary = `stremio_offline_${randomBytes(8).toString("hex")}`;
       reply.code(206);
       reply.header("Content-Type", `multipart/byteranges; boundary=${boundary}`);
-      return reply.send(buildMultipartByterangesStream(row.filePath, ranges, size, boundary, "video/mp4"));
+      return reply.send(buildMultipartByterangesStream(filePath, ranges, size, boundary, contentType));
     },
   );
 }

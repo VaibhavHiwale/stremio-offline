@@ -3,6 +3,7 @@ import type { SubsystemStatus } from "@stremio-offline/shared";
 import { buildApp } from "./app.js";
 import { closeDb, openDb } from "./db/client.js";
 import { reconcile } from "./queue/reconcile.js";
+import { startRemuxRunner } from "./queue/remuxRunner.js";
 import { startQueueRunner } from "./queue/runner.js";
 import { acquireHttpsTransport } from "./transport/certManager.js";
 import { loadOrCreateSecret } from "./transport/secretStore.js";
@@ -39,6 +40,7 @@ async function main(): Promise<void> {
   }
 
   const queueRunner = startQueueRunner({ db, storageRoot: STORAGE_ROOT });
+  const remuxRunner = startRemuxRunner({ db, storageRoot: STORAGE_ROOT });
 
   let certStatus: SubsystemStatus = "down";
   let certExpiresAt: string | null = null;
@@ -108,6 +110,7 @@ async function main(): Promise<void> {
       // safe to interrupt at any point — the next boot's reconciliation
       // picks up wherever it left off.
       await queueRunner.stop();
+      await remuxRunner.stop();
       await httpApp.close();
       if (httpsApp) await httpsApp.close();
       closeDb();

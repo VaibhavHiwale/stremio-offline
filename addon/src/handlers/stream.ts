@@ -6,8 +6,10 @@ import type { StreamEntry, StreamResponse } from "../protocol.js";
 export interface StreamRouteDeps {
   db: Database;
   isLegalAccepted: () => boolean;
-  /** Resolves a signed, absolute (never-loopback) playback URL for a ready download_items row. */
+  /** Resolves a signed, absolute (never-loopback) playback URL for a ready download_items row's web-ready MP4. */
   buildFileUrl: (req: FastifyRequest, downloadItemId: string) => string;
+  /** Same, but for the pre-remux original file — CLAUDE.md §3 Rule 1's "second entry". */
+  buildOriginalFileUrl: (req: FastifyRequest, downloadItemId: string) => string;
 }
 
 interface StreamParams {
@@ -39,32 +41,47 @@ function formatEta(seconds: number | null): string {
  * generate the required confirmation clip; wiring a button that leads
  * nowhere real would be a half-finished feature, not a working one.
  */
-function buildStreamEntry(req: FastifyRequest, row: DownloadItemRow, deps: StreamRouteDeps): StreamEntry | null {
+function buildStreamEntries(req: FastifyRequest, row: DownloadItemRow, deps: StreamRouteDeps): StreamEntry[] {
   switch (row.status) {
-    case "ready":
-      return {
-        name: `▶️ Play offline · ${row.quality}`,
-        title: row.title,
-        url: deps.buildFileUrl(req, row.id),
-        behaviorHints: { filename: row.title },
-      };
+    case "ready": {
+      const entries: StreamEntry[] = [
+        {
+          name: `▶️ Play offline · ${row.quality}`,
+          title: row.title,
+          url: deps.buildFileUrl(req, row.id),
+          behaviorHints: { filename: row.title },
+        },
+      ];
+      // Rule 1: "optionally offer the original as a second entry ... for
+      // desktop/Android users" — only those have a streaming server capable
+      // of playing a non-web-ready source.
+      if (row.filePathOriginal) {
+        entries.push({
+          name: "Original quality (needs streaming server)",
+          title: row.title,
+          url: deps.buildOriginalFileUrl(req, row.id),
+          behaviorHints: { filename: row.title, notWebReady: true },
+        });
+      }
+      return entries;
+    }
     case "queued": {
       const position = queuePosition(deps.db, row);
-      return { name: `🕐 Queued (position ${position})`, title: row.title };
+      return [{ name: `🕐 Queued (position ${position})`, title: row.title }];
     }
     case "downloading": {
       const parts = [`${row.progressPct.toFixed(0)}%`, formatSpeed(row.speedBps), formatEta(row.etaSeconds)].filter(
         Boolean,
       );
-      return { name: `⏳ Downloading… ${parts.join(" · ")}`, title: row.title };
+      return [{ name: `⏳ Downloading… ${parts.join(" · ")}`, title: row.title }];
     }
     case "resolving":
-      return { name: "🕐 Resolving source…", title: row.title };
+      return [{ name: "🕐 Resolving source…", title: row.title }];
     case "remuxing":
     case "verifying":
-      return { name: "⚙️ Preparing for playback…", title: row.title };
+      return [{ name: "⚙️ Preparing for playback…", title: row.title }];
     default:
-      return null;
+      return [];
   }
 }
 
@@ -75,9 +92,7 @@ export function registerStreamRoutes(app: FastifyInstance, deps: StreamRouteDeps
     }
 
     const rows = queryByStremioId(deps.db, req.params.id);
-    const streams = rows
-      .map((row) => buildStreamEntry(req, row, deps))
-      .filter((s): s is StreamEntry => s !== null);
+    const streams = rows.flatMap((row) => buildStreamEntries(req, row, deps));
 
     return reply.send({ streams } satisfies StreamResponse);
   }

@@ -17,6 +17,11 @@ export function originalPath(storageRoot: string, downloadItemId: string, source
   return join(storageRoot, ".offline", "originals", `${downloadItemId}${ext}`);
 }
 
+/** Staging output for an in-progress remux — never the final library path directly, so a crash mid-remux never leaves a half-written file where the addon might serve it. */
+export function remuxTempPath(storageRoot: string, downloadItemId: string): string {
+  return join(storageRoot, ".offline", "remux", `${downloadItemId}.remux.mp4`);
+}
+
 function guessExtension(sourceUrl: string): string {
   try {
     const ext = extname(new URL(sourceUrl).pathname);

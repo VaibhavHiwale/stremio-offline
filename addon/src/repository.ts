@@ -16,6 +16,7 @@ export interface DownloadItemRow {
   bytesTotal: number | null;
   speedBps: number | null;
   etaSeconds: number | null;
+  filePathOriginal: string | null;
   filePathWebReady: string | null;
   priority: number;
   addedAt: string;
@@ -25,7 +26,8 @@ const ROW_COLUMNS = `
   id, stremio_id AS stremioId, series_id AS seriesId, type, title, year, season, episode,
   quality, status, progress_pct AS progressPct, bytes_downloaded AS bytesDownloaded,
   bytes_total AS bytesTotal, speed_bps AS speedBps, eta_seconds AS etaSeconds,
-  file_path_web_ready AS filePathWebReady, priority, added_at AS addedAt
+  file_path_original AS filePathOriginal, file_path_web_ready AS filePathWebReady,
+  priority, added_at AS addedAt
 `;
 
 const VISIBLE_STATUSES = "status NOT IN ('cancelled', 'deleted')";

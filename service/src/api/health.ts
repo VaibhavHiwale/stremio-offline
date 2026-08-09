@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
+import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import type { HealthReport, SubsystemStatus } from "@stremio-offline/shared";
 import type { Database } from "better-sqlite3";
+import ffmpegBinaryPathRaw from "ffmpeg-static";
 import { getFreeBytes } from "../storage/diskspace.js";
+
+const ffmpegBinaryPath = ffmpegBinaryPathRaw as unknown as string | null;
 
 async function checkDisk(storageRoot: string): Promise<{ status: SubsystemStatus; freeBytes: number | null }> {
   const freeBytes = await getFreeBytes(storageRoot);
@@ -21,10 +25,16 @@ function checkDb(db: Database): SubsystemStatus {
   }
 }
 
+/**
+ * Uses the bundled ffmpeg-static / @ffprobe-installer binaries rather than a
+ * system PATH lookup — CLAUDE.md §5: "never assume a system ffmpeg exists."
+ */
 function checkFfmpeg(): SubsystemStatus {
+  if (!ffmpegBinaryPath) return "down";
   try {
-    const result = spawnSync("ffmpeg", ["-version"], { timeout: 3000 });
-    return result.status === 0 ? "ok" : "down";
+    const ffmpegResult = spawnSync(ffmpegBinaryPath, ["-version"], { timeout: 3000 });
+    const ffprobeResult = spawnSync(ffprobeInstaller.path, ["-version"], { timeout: 3000 });
+    return ffmpegResult.status === 0 && ffprobeResult.status === 0 ? "ok" : "down";
   } catch {
     return "down";
   }

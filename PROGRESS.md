@@ -13,7 +13,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P1 Transport | ✅ done, pushed | commit `2969465` — cert-API path implemented; Tailscale/Cloudflare stubbed (not chosen) |
 | P2 Addon surface | ✅ done, pushed | commit `c719db4` |
 | P3 Download core | ✅ done, pushed | commit `1be957a` |
-| P4 Remux pipeline | 🚧 **in progress, uncommitted** | see below |
+| P4 Remux pipeline | ✅ done | see below |
 | P5 Queue | not started | |
 | P6 Resolvers | not started | |
 | P7 Subtitles | not started | |
@@ -23,17 +23,18 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P11 Resume playback | not started | |
 
 Repo: https://github.com/VaibhavHiwale/stremio-offline (remote `origin`, branch `master`).
-All P0–P3 work is pushed. **Nothing from P4 is committed yet** — it's all in the
-working tree only.
+P0–P4 work is committed locally (P4 landed via a squash-merge from
+`wip/p4-remux-pipeline`, which was a temporary parking branch while it didn't
+typecheck — that branch can be deleted now). **Confirm what's actually pushed
+with `git log origin/master..master` before assuming parity with GitHub.**
 
-## P4 — Remux pipeline: current state
+## P4 — Remux pipeline: done
 
-### Done
+### Built
 - `service/src/media/probe.ts` — ffprobe wrapper (codecs, duration, pixel format)
 - `service/src/media/decision.ts` — copy-remux vs full-transcode decision (binary,
   per spec: H.264/AAC → copy; anything else → transcode both streams)
-- `service/src/media/remux.ts` — ffmpeg execution (copy or transcode args) — **has
-  typecheck errors, see below**
+- `service/src/media/remux.ts` — ffmpeg execution (copy or transcode args)
 - `service/src/media/verify.ts` — extended with `verifyRemuxOutput` (post-remux
   duration-within-1%, video+audio stream presence, non-zero size)
 - `service/src/storage/libraryPath.ts` — Movies/Series library layout + filename
@@ -42,75 +43,72 @@ working tree only.
 - `service/src/queue/semaphore.ts` — generic counting semaphore
 - `service/src/queue/remuxRunner.ts` — `processRemuxRow` (single-row, testable) +
   `startRemuxRunner` (background worker pool bounded by the semaphore,
-  `min(2, cpus-1)` default concurrency)
+  `min(2, cpus-1)` default concurrency), wired into `service/src/index.ts`
+  alongside the download `startQueueRunner`, with the same `stop()` on
+  SIGTERM/SIGINT graceful-shutdown pattern.
 - `service/src/db/downloadItems.ts` — added `markReady`; extended `QueueRow` /
-  `ROW_COLUMNS` with `type, title, year, season, episode` (needed for library path
-  computation)
-- Dependencies installed and verified working: `ffmpeg-static` (83MB binary,
-  downloads fine), `@ffprobe-installer/ffprobe` (platform-specific binary — see
-  gotcha below). Both resolve and run correctly on this machine; ffmpeg has
-  `libx264`, `aac`, `libx265`/`hevc` encoders available (confirmed via `-encoders`,
-  useful for generating synthetic HEVC test fixtures without needing real media).
+  `ROW_COLUMNS` with `type, title, year, season, episode`.
+- `service/src/api/health.ts`'s `checkFfmpeg` now spawns the bundled
+  `ffmpeg-static` / `@ffprobe-installer/ffprobe` binaries directly instead of
+  assuming a system PATH `ffmpeg` (CLAUDE.md §5).
+- Rule 1's "second entry" — ready rows now return **two** stream entries:
+  the web-ready MP4 (`▶️ Play offline · <quality>`) and, when a
+  `file_path_original` exists, `Original quality (needs streaming server)`
+  with `behaviorHints.notWebReady: true`. Plumbing: `addon/src/repository.ts`
+  exposes `filePathOriginal`; `addon/src/handlers/stream.ts` builds both
+  entries; `service/src/api/files.ts` gained a `?variant=original` query
+  param (same signed token covers either variant — both files belong to the
+  one authorized download item) with the correct content-type
+  (`application/octet-stream`, not `video/mp4`, since the original container
+  isn't guaranteed to be MP4); `service/src/app.ts` wires a second
+  `buildOriginalFileUrl`.
+- Dependencies: `ffmpeg-static`, `@ffprobe-installer/ffprobe` — both resolve
+  and run correctly on this (Windows) machine; ffmpeg has `libx264`, `aac`,
+  `libx265`/`hevc` encoders available, used to generate synthetic test
+  fixtures via `-f lavfi` (no real media files needed anywhere in the suite).
 
-### Broken right now — fix this first
-`service/src/media/remux.ts` fails typecheck (`npm run typecheck --workspace
-service`) with two distinct root causes at lines 58/61/66/67:
+### Tests
+- `service/src/testutils/mediaFixtures.ts` — shared helper generating a
+  synthetic H.264/AAC MP4 and an HEVC/AC3 MKV via ffmpeg lavfi sources.
+- `media/decision.test.ts` — pure logic against fake `ProbeResult` objects
+  (copy vs. transcode for every branch: HEVC, 10-bit, non-AAC audio, missing
+  streams).
+- `media/probe.test.ts` — probes both synthetic fixtures, asserts real
+  codec/duration detection (not extension-guessing).
+- `media/remux.test.ts` — runs `runFfmpeg` for both plans end-to-end plus a
+  nonexistent-input failure case.
+- `queue/remuxRunner.test.ts` — integration test via `processRemuxRow`:
+  copy-remux path lands in the library (not the `.offline/remux/` staging
+  dir, which is gone after the atomic rename), transcode path converts
+  HEVC/AC3 → H.264/AAC, a corrupted/truncated input fails cleanly (row →
+  `failed`, nothing written to the library path), and a row missing
+  `file_path_original` fails immediately without touching ffmpeg.
+  **Gotcha**: the transcode fixture needs ≥5s duration — at 1s, normal
+  encoder frame-boundary rounding alone can exceed the 1% duration-drift
+  tolerance in `verifyRemuxOutput` and fail the test for a reason that has
+  nothing to do with the code under test.
+- All 53 service tests + 5 addon tests pass (`npm run typecheck` and
+  `npm run build` clean across all three workspaces).
 
-1. **`ffmpeg-static` import type**: `import ffmpegBinaryPath from "ffmpeg-static"`
-   resolves to `string | typeof import(".../ffmpeg-static/types/index")` instead of
-   the declared `string | null` (the package's own `.d.ts` says `declare const
-   ffmpegPath: string | null`). This looks like a NodeNext/CJS-interop quirk, not a
-   real type. **Fix**: cast at the import site, e.g.
-   `const ffmpegBinaryPath = ffmpegBinaryPathRaw as string | null;` right after the
-   import.
-2. **`spawn()` overload collapse**: `const spawnOpts: Parameters<typeof spawn>[2]
-   = {}` makes TS lose the correct overload and infers the return type of
-   `spawn(bin, args, spawnOpts)` as `never`, cascading into "Property 'stderr' does
-   not exist on type 'never'" etc. **Fix**: type `spawnOpts` explicitly as
-   `SpawnOptions` imported from `node:child_process` instead of the `Parameters<...>`
-   trick.
+### End-to-end verification performed
+Booted the real service (`SKIP_CERT_ACQUISITION=1`), served a real
+synthetic HEVC/AC3 fixture over a local Range-capable HTTP server, inserted
+a `queued` row directly (no REST enqueue endpoint exists yet — that's P5),
+and confirmed: the row progressed `queued → downloading → remuxing →
+ready`; the final file (ffprobe-verified `h264`/`aac`) landed at the
+computed library path; `GET /stream/movie/:id.json` returned both stream
+entries with the correct `behaviorHints`; `GET /files/:id` served the
+web-ready variant as `video/mp4` and, with `&variant=original`, served the
+raw pre-remux file byte-for-byte identical to what was downloaded. This is
+the ffprobe-level proxy for "plays on device 3/4" from CLAUDE.md §9 — actual
+device playback still needs the real acceptance matrix once this is
+deployed off this dev machine.
 
-Neither is a logic bug — just needs the typing fixed, then re-run `npm run
-typecheck --workspace service` to confirm clean, then `npm run build`.
-
-### Not started yet
-1. Wire `startRemuxRunner` into `service/src/index.ts` (alongside the existing
-   download `startQueueRunner`), with matching graceful-shutdown handling
-   (`stop()` on SIGTERM/SIGINT, same pattern as the download runner).
-2. Fix `service/src/api/health.ts`'s `checkFfmpeg` — it currently does
-   `spawnSync("ffmpeg", ["-version"])`, assuming a system PATH binary. Now that
-   `ffmpeg-static`/`@ffprobe-installer/ffprobe` are bundled, point it at the
-   resolved binary paths instead (matches CLAUDE.md §5: "never assume a system
-   ffmpeg exists").
-3. Extend the addon per Rule 1's second half: "Return the MP4 stream first;
-   optionally offer the original as a second entry labelled 'Original quality
-   (needs streaming server)' for desktop/Android users."
-   - `addon/src/handlers/stream.ts`: for `status === "ready"` rows, add a second
-     stream entry pointing at the original file, with `behaviorHints.notWebReady:
-     true` (the original isn't guaranteed to be MP4/H.264).
-   - `service/src/api/files.ts`: currently only serves `file_path_web_ready`.
-     Needs a way to also serve `file_path_original` — e.g. a route/query
-     variant — plus a second signed-URL builder in `app.ts`'s `buildFileUrl`
-     wiring for the addon.
-4. Tests: no P4 tests exist yet. Plan (validated as feasible — ffmpeg can generate
-   synthetic test video+audio with `-f lavfi` sources, no real media files needed):
-   - `media/decision.test.ts` — pure logic, no ffmpeg needed (feed it fake
-     `ProbeResult` objects).
-   - `media/probe.test.ts` / `media/remux.test.ts` / integration test in
-     `queue/remuxRunner.test.ts` — generate a small H.264/AAC MP4 (copy-remux path)
-     and a small HEVC/AC3 MKV (transcode path) via `ffmpeg -f lavfi -i testsrc -f
-     lavfi -i sine ...`, run them through `processRemuxRow`, assert: correct plan
-     chosen, output lands in the library path (not `.offline/remux/`), ffprobe on
-     the output confirms `h264`/`aac`, row status becomes `ready` with
-     `file_path_web_ready` set, `.offline/remux/<id>.remux.mp4` staging file is
-     gone (renamed, not copied).
-   - Verify a corrupted/truncated input causes `verifyRemuxOutput` to fail cleanly
-     (row → `failed`, no partial file left in the library path).
-5. End-to-end local verification (same pattern as P1–P3): boot the real service,
-   feed a real download through P3 into `remuxing`, confirm P4 picks it up and the
-   final file plays back (byte-level ffprobe check, not just "no error").
-6. Commit + push P4, following the same commit-message style as P1–P3 (what was
-   built, what was verified, what's still unverified/deferred and why).
+### Deferred / not done in P4
+- Real device playback testing (needs the acceptance matrix — separate
+  always-on deployment target, not this Windows dev machine).
+- Windows `SIGTERM` graceful-shutdown timing is still unverified (same
+  caveat as P3 — `Stop-Process` in PowerShell isn't real POSIX `SIGTERM`).
 
 ## Environment / gotchas learned so far (don't rediscover these)
 

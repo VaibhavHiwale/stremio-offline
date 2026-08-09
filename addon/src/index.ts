@@ -11,6 +11,7 @@ import { isLegalAccepted } from "./legal.js";
 export interface AddonDeps {
   db: Database;
   buildFileUrl: (req: FastifyRequest, downloadItemId: string) => string;
+  buildOriginalFileUrl: (req: FastifyRequest, downloadItemId: string) => string;
   resolveBaseUrl: (req: FastifyRequest) => string | null;
 }
 
@@ -21,7 +22,12 @@ export function registerAddonRoutes(app: FastifyInstance, deps: AddonDeps): void
   registerManifestRoutes(app, { isLegalAccepted: legalAccepted });
   registerCatalogRoutes(app, { db: deps.db, isLegalAccepted: legalAccepted });
   registerMetaRoutes(app, { db: deps.db, isLegalAccepted: legalAccepted });
-  registerStreamRoutes(app, { db: deps.db, isLegalAccepted: legalAccepted, buildFileUrl: deps.buildFileUrl });
+  registerStreamRoutes(app, {
+    db: deps.db,
+    isLegalAccepted: legalAccepted,
+    buildFileUrl: deps.buildFileUrl,
+    buildOriginalFileUrl: deps.buildOriginalFileUrl,
+  });
   registerSubtitlesRoutes(app);
   registerConfigureRoutes(app, { db: deps.db, resolveBaseUrl: deps.resolveBaseUrl });
 }
