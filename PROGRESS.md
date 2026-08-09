@@ -13,7 +13,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P1 Transport | ✅ done, pushed | commit `2969465` — cert-API path implemented; Tailscale/Cloudflare stubbed (not chosen) |
 | P2 Addon surface | ✅ done, pushed | commit `c719db4` |
 | P3 Download core | ✅ done, pushed | commit `1be957a` |
-| P4 Remux pipeline | ✅ done | see below |
+| P4 Remux pipeline | ✅ done, **not yet pushed** | commit `48d499f` — see below |
 | P5 Queue | not started | |
 | P6 Resolvers | not started | |
 | P7 Subtitles | not started | |
