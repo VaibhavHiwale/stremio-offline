@@ -16,7 +16,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P4 Remux pipeline | ✅ done, pushed | commit `48d499f` |
 | P5 Queue | ✅ done, pushed | commit `3f8cb8a` |
 | P6 Resolvers | ✅ done, pushed | commit `30ae4b4` — **unverified against real debrid APIs**, see below |
-| P7 Subtitles | ✅ done, **not yet pushed** | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
+| P7 Subtitles | ✅ done, pushed | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
 | P8 Storage | not started | |
 | P9 Progress + dashboard | not started | |
 | P10 Episode auto-download | not started | |
