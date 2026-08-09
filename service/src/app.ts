@@ -4,9 +4,11 @@ import type { Database } from "better-sqlite3";
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { buildHealthReport } from "./api/health.js";
 import { registerDebridAccountsRoutes } from "./api/debridAccounts.js";
+import { registerDiagnosticsRoutes } from "./api/diagnostics.js";
 import { registerDownloadsRoutes } from "./api/downloads.js";
 import { buildSignedFileUrl, registerFilesRoute } from "./api/files.js";
 import type { SubsystemStatus } from "@stremio-offline/shared";
+import { recordError } from "./observability/errorLog.js";
 import type { RemuxRunnerHandle } from "./queue/remuxRunner.js";
 import type { SchedulerHandle } from "./queue/scheduler.js";
 import { resolveBaseUrl } from "./transport/baseUrl.js";
@@ -19,6 +21,7 @@ export interface AppDeps {
   fileTokenSecret: string;
   scheduler: SchedulerHandle;
   remuxRunner: RemuxRunnerHandle;
+  installIdHash: string;
   /** Explicit override (env PUBLIC_BASE_URL, or the domain from an acquired cert) — see transport/baseUrl.ts. */
   configuredBaseUrl: string | null;
   /** Read live, not snapshotted — cert acquisition finishes after boot. */
@@ -48,6 +51,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // CORS on every route — Stremio Web fetches these cross-origin. See Rule 8.
   app.register(cors, { origin: true });
 
+  // Catches anything a route handler threw instead of handling itself (a DB
+  // write failure, an unexpected null, ...) — records it before Fastify's
+  // default 500 response, so REST-originated failures show up in the
+  // weekly rollup the same way scheduler/remuxRunner job failures do.
+  app.setErrorHandler((err, req, reply) => {
+    recordError(deps.storageRoot, "rest", err, { requestPath: req.url, installIdHash: deps.installIdHash });
+    const statusCode = "statusCode" in err && typeof err.statusCode === "number" ? err.statusCode : 500;
+    reply.code(statusCode).send({ error: statusCode === 500 ? "internal server error" : err.message });
+  });
+
   app.get("/health", async (_req, reply) => {
     const certInfo = deps.getCertInfo();
     const report = await buildHealthReport({
@@ -70,6 +83,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerDebridAccountsRoutes(app, { db: deps.db });
+
+  registerDiagnosticsRoutes(app, { storageRoot: deps.storageRoot });
 
   registerAddonRoutes(app, {
     db: deps.db,

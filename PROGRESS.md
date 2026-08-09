@@ -28,85 +28,46 @@ P0–P4 work is committed locally (P4 landed via a squash-merge from
 typecheck — that branch can be deleted now). **Confirm what's actually pushed
 with `git log origin/master..master` before assuming parity with GitHub.**
 
-## ⚠️ In progress: error-capture system — read this before doing anything else
+## Error-capture system: done (not a CLAUDE.md phase — no P-number)
 
-Not a CLAUDE.md phase — a separate feature the user asked for mid-session
-(2026-08-09), outside the P0–P11 build order: capture unhandled failures
-(resolver exceptions, DB write failures, REST handler errors) into a local
-append-only structured log with a hashed per-install identifier, and roll
-that up weekly into a markdown summary grouped by component + error type so
-the most frequent failure class is obvious before new feature work starts.
-Two mismatches against a literal reading of the original request were
-confirmed with the user before building: "household token" → this project
-has no household/multi-tenant concept, so it's a **per-install** hashed
-identifier instead; "Cinemeta" → this service never calls Cinemeta (or any
-metadata addon) anywhere, so that reference was dropped — error capture
-covers this service's *actual* external calls (debrid resolvers,
-OpenSubtitles, REST handlers).
+User-requested mid-session (2026-08-09), outside the P0–P11 build order:
+unhandled failures (resolver exceptions, DB write failures, REST handler
+errors) get appended as structured records to a local append-only NDJSON
+log with a hashed per-install identifier, rolled up weekly into a markdown
+summary grouped by component + error type. Two mismatches against a
+literal reading of the original request were confirmed with the user
+before building: "household token" → this project has no household/
+multi-tenant concept, so it's a **per-install** hashed identifier instead;
+"Cinemeta" → this service never calls Cinemeta anywhere, so that reference
+was dropped in favor of this service's actual external calls.
 
-**Session paused mid-implementation at the user's request ("stop in a way
-we can resume").** Current state: typechecks clean, builds clean, all 144
-service tests still pass — nothing is broken, the new code just isn't
-reachable or tested yet.
+`observability/{installId,errorLog,weeklyRollup}.ts` — `getInstallIdHash`
+(reuses the existing generate-once-and-persist secret pattern, SHA-256
+hashed, raw id never leaves that one file); `recordError`/`readRecentErrors`
+(synchronous append — errors are rare, the write is small, and a
+fire-and-forget async write risks losing the record a crash shortly after
+would need; never throws itself); `generateWeeklyRollupMarkdown`/
+`persistWeeklyRollup`/`isWeeklyRollupDue` (most-frequent-first markdown
+table, regenerated at boot and once a day thereafter via `index.ts`'s
+`setInterval`, unref'd so it never keeps the process alive on its own).
 
-### Done so far
-- `service/src/observability/installId.ts` — `getInstallIdHash(storageRoot)`,
-  reuses the existing `loadOrCreateSecret` generate-once-and-persist pattern
-  (same as the file-token secret) for the raw id, SHA-256-hashes it before
-  ever returning it. The raw id never leaves this file.
-- `service/src/observability/errorLog.ts` — `ErrorRecord` shape
-  (`timestamp, component, errorType, message, stack?, requestPath?,
-  installIdHash`); `recordError()` appends one NDJSON line to
-  `.offline/logs/errors.ndjson`, synchronously (errors are rare, the write
-  is small, and a fire-and-forget async write risks losing the very record
-  a crash shortly after would need) — never throws itself, a broken logger
-  must not become a second failure; `readRecentErrors(storageRoot, sinceMs)`
-  reads and filters by cutoff, skipping any corrupted line (e.g. a torn
-  write across a crash) rather than failing the whole read.
-- `service/src/observability/weeklyRollup.ts` — `generateWeeklyRollupMarkdown`
-  (pure function: groups by component+errorType, most-frequent first, a
-  markdown table); `persistWeeklyRollup(storageRoot)` writes it to
-  `.offline/logs/weekly-summary.md`; `isWeeklyRollupDue(storageRoot)` — true
-  when 7+ days have passed since that file's mtime, or it doesn't exist yet.
-- Wired into the two places that were previously **silently swallowing**
-  unexpected exceptions (a real, separate bug this work surfaced, not just
-  new instrumentation): `queue/scheduler.ts`'s per-job `.catch(() =>
-  undefined)` and `queue/remuxRunner.ts`'s equivalent now both call
-  `recordError(..., "scheduler" | "remuxRunner", err, ...)` before
-  discarding. `remuxRunner.ts`'s subtitle-fetch catch (P7, already
-  best-effort by design) also now records instead of silently doing
-  nothing — useful for noticing a persistently bad key/quota in the rollup.
-  Both `SchedulerDeps` and `RemuxRunnerDeps` gained an optional
-  `installIdHash` field (defaults to `"unknown"` so existing tests/call
-  sites didn't need updating).
+Wired into `app.ts`'s new Fastify `setErrorHandler` (REST errors — never
+leaks the raw error message on a 500, always logs one internally) and,
+more importantly, into two places that were previously **silently
+swallowing unexpected exceptions** — `queue/scheduler.ts`'s and
+`queue/remuxRunner.ts`'s per-job `.catch(() => undefined)`, a real,
+separate bug this work surfaced rather than just new instrumentation.
+`remuxRunner.ts`'s subtitle-fetch catch (P7) also now records instead of
+silently doing nothing. New `GET /diagnostics/errors` computes the rollup
+fresh from the log on every request (cheap), independent of the on-disk
+weekly file anyone can also just read directly.
 
-### Not done yet — resume here
-1. **`app.ts`'s Fastify error handler** — was about to add
-   `app.setErrorHandler((err, req, reply) => { recordError(deps.storageRoot,
-   "rest", err, { requestPath: req.url, installIdHash: deps.installIdHash });
-   ... })` when paused. This is the main gap: REST handler errors (DB write
-   failures inside a route, etc.) aren't captured yet. `AppDeps` needs a new
-   `installIdHash: string` field threaded through from `index.ts`.
-2. **`GET /diagnostics/errors` endpoint** — new route (new
-   `api/diagnostics.ts`, or added to `health.ts`) returning
-   `{ generatedAt, markdown, groups }` computed fresh from
-   `generateWeeklyRollupMarkdown(readRecentErrors(...))` on every request
-   (cheap — it's just parsing an NDJSON file), independent of the on-disk
-   weekly file.
-3. **`index.ts` wiring** — compute `getInstallIdHash(STORAGE_ROOT)` once at
-   boot, pass into `buildApp`, `startScheduler`, `startRemuxRunner`. Call
-   `persistWeeklyRollup` once at boot if `isWeeklyRollupDue`, then check
-   periodically (e.g. once a day via `setInterval`/a poll loop matching the
-   existing scheduler/remuxRunner style) and regenerate when due.
-4. **Tests** — none written yet for `installId.ts`/`errorLog.ts`/
-   `weeklyRollup.ts` (should be straightforward: temp dir + assert file
-   contents, matching every other module's test style in this repo), the
-   new Fastify error handler (a route that deliberately throws → assert a
-   record was appended), and the new `/diagnostics/errors` endpoint.
-5. **PROGRESS.md** — once finished, fold this section's detail down like
-   every completed phase above it, and note it's a standalone feature, not
-   a CLAUDE.md phase (doesn't get a P-number).
-6. Commit. Ask before pushing, same as every other phase in this file.
+26 new tests (161 total) covering every module plus the Fastify error
+handler (forces a real `better-sqlite3` throw by closing the DB connection
+before the request, not a mock) and the diagnostics endpoint. Full E2E
+against the real service: boot-time rollup file written, a real forced
+REST error shows up in `/diagnostics/errors` attributed to the `rest`
+component. All 7 checks passed.
 
 ## P4 — Remux pipeline: done (condensed; full detail in commit `48d499f`)
 

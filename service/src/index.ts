@@ -2,11 +2,15 @@ import { join } from "node:path";
 import type { SubsystemStatus } from "@stremio-offline/shared";
 import { buildApp } from "./app.js";
 import { closeDb, openDb } from "./db/client.js";
+import { getInstallIdHash } from "./observability/installId.js";
+import { isWeeklyRollupDue, persistWeeklyRollup } from "./observability/weeklyRollup.js";
 import { reconcile } from "./queue/reconcile.js";
 import { startRemuxRunner } from "./queue/remuxRunner.js";
 import { startScheduler } from "./queue/scheduler.js";
 import { acquireHttpsTransport } from "./transport/certManager.js";
 import { loadOrCreateSecret } from "./transport/secretStore.js";
+
+const ROLLUP_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day is plenty for a weekly artifact
 
 const HTTP_PORT = Number(process.env.HTTP_PORT ?? 11470);
 const HTTPS_PORT = Number(process.env.HTTPS_PORT ?? 12470);
@@ -26,6 +30,7 @@ const loggerOptions = {
 async function main(): Promise<void> {
   const db = openDb(DB_PATH);
   const fileTokenSecret = loadOrCreateSecret(join(STORAGE_ROOT, ".offline", "file-token-secret"));
+  const installIdHash = getInstallIdHash(STORAGE_ROOT);
 
   // The DB is a cache of filesystem reality, never the other way round —
   // CLAUDE.md §4. Must run before the queue runner starts pulling jobs.
@@ -41,10 +46,22 @@ async function main(): Promise<void> {
     );
   }
 
-  const scheduler = startScheduler({ db, storageRoot: STORAGE_ROOT });
-  const remuxRunnerDeps: Parameters<typeof startRemuxRunner>[0] = { db, storageRoot: STORAGE_ROOT };
+  const scheduler = startScheduler({ db, storageRoot: STORAGE_ROOT, installIdHash });
+  const remuxRunnerDeps: Parameters<typeof startRemuxRunner>[0] = { db, storageRoot: STORAGE_ROOT, installIdHash };
   if (OPENSUBTITLES_BASE_URL) remuxRunnerDeps.subtitlesBaseUrl = OPENSUBTITLES_BASE_URL;
   const remuxRunner = startRemuxRunner(remuxRunnerDeps);
+
+  // Weekly error-summary artifact — CLAUDE.md-adjacent observability, not a
+  // spec'd phase. Regenerate at boot if it's missing/stale, then check once
+  // a day; a `setInterval` poll matches this codebase's existing style
+  // (scheduler/remuxRunner) rather than pulling in a cron dependency for
+  // something that fires at most once a week.
+  async function refreshWeeklyRollupIfDue(): Promise<void> {
+    if (await isWeeklyRollupDue(STORAGE_ROOT)) await persistWeeklyRollup(STORAGE_ROOT);
+  }
+  void refreshWeeklyRollupIfDue();
+  const rollupInterval = setInterval(() => void refreshWeeklyRollupIfDue(), ROLLUP_CHECK_INTERVAL_MS);
+  rollupInterval.unref(); // never keep the process alive on its own
 
   let certStatus: SubsystemStatus = "down";
   let certExpiresAt: string | null = null;
@@ -61,6 +78,7 @@ async function main(): Promise<void> {
     fileTokenSecret,
     scheduler,
     remuxRunner,
+    installIdHash,
     configuredBaseUrl: PUBLIC_BASE_URL,
     getCertInfo,
     logger: loggerOptions,
@@ -100,6 +118,7 @@ async function main(): Promise<void> {
       fileTokenSecret,
       scheduler,
       remuxRunner,
+      installIdHash,
       configuredBaseUrl: PUBLIC_BASE_URL ?? `https://${transport.domain}:${HTTPS_PORT}`,
       getCertInfo,
       logger: loggerOptions,
@@ -113,6 +132,7 @@ async function main(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     httpApp.log.info({ signal }, "shutting down");
     try {
+      clearInterval(rollupInterval);
       // Stop pulling new work first; the in-flight download (if any) keeps
       // writing to its .part file until its current chunk finishes, which is
       // safe to interrupt at any point — the next boot's reconciliation
