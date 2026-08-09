@@ -18,7 +18,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P6 Resolvers | ✅ done, pushed | commit `30ae4b4` — **unverified against real debrid APIs**, see below |
 | P7 Subtitles | ✅ done, pushed | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
 | P8 Storage | ✅ done, pushed | commit `98022a1` — see below, fully verified end-to-end, including the real background sweeper |
-| P9 Progress + dashboard | not started | |
+| P9 Progress + dashboard | ✅ done, **not yet pushed** | see below — real E2E caught and fixed a genuine WS registration bug that unit tests alone missed |
 | P10 Episode auto-download | not started | |
 | P11 Resume playback | not started | |
 
@@ -311,6 +311,146 @@ checks passed.
   themselves are fully verified, but nothing in this codebase can set
   `watched=true` through normal use yet.
 
+## P9 — Progress + dashboard: done. Read the WS gotcha below before touching `/ws/progress` again
+
+A real end-to-end run (not just unit tests) caught a genuine bug that would
+otherwise have shipped: every real WebSocket connection to `/ws/progress`
+was getting a `500` and `socket.send is not a function` internally. The
+unit tests all passed anyway, because they set up the `@fastify/websocket`
+plugin differently than production code did — see the dedicated gotcha
+entry below. This is the reason P9 took longer than P8: chasing this down
+and confirming the fix with a real `ws` client against the real running
+service, not just Fastify's `.inject()`.
+
+### Built
+
+- `api/wsProgress.ts` — `WS /ws/progress` (CLAUDE.md §8). One shared
+  `setInterval` (default 1s) polls `db/downloadItems.ts:getActiveItems`
+  (new — every non-terminal status in one query) and broadcasts a full
+  snapshot to every connected client; a new connection also gets an
+  immediate snapshot on open rather than waiting out the poll interval.
+  Deliberately *not* wired into every progress-writing call site across
+  P3/P5/P6 — that would mean touching already-tested code in several
+  packages for a latency improvement nobody would notice in a progress
+  bar. See the gotcha below for how the plugin is registered.
+- `api/diagnostics.ts` — added `GET /diagnostics` (the actual CLAUDE.md §4
+  page: resolves the base URL, checks the HTTPS cert, probes ffmpeg,
+  confirms the manifest is fetchable — distinct from the pre-existing
+  `GET /diagnostics/errors` JSON endpoint from the error-capture system,
+  which stays as-is).
+- `db/settings.ts` + `api/settings.ts` — `GET|PATCH /settings` (CLAUDE.md
+  §8) didn't exist through P0–P8 despite being in the spec's API table;
+  built now because the dashboard genuinely needs it to expose any
+  settings UI at all. Partial-update via a whitelisted field→column map
+  (never builds SQL from a caller-supplied field name). Deliberately
+  excludes `legalNoticeAcceptedAt` from what a PATCH can set (silently
+  dropped, not an error) — that has its own dedicated accept flow in
+  `legal.ts` and must not be settable by just PATCHing settings.
+- **`dashboard/`** — new workspace (Vite + React 18 + TypeScript,
+  registered in the root `package.json` workspaces array and build
+  script). Two views: a live download list (REST fetch on load + 5s
+  poll, live-merged with `/ws/progress` snapshots for in-flight items,
+  pause/resume/retry/delete actions) and a settings view (general
+  settings, debrid accounts, storage targets — all against the REST
+  endpoints already built in P5/P6/P8/P9). Hand-rolled CSS (light/dark via
+  `prefers-color-scheme`), no UI framework — matches this project's
+  existing "hand-roll where reasonable" pattern from the addon package.
+  PWA manifest + SVG icon for installability.
+- `api/dashboardStatic.ts` — serves `dashboard/dist` at `/` via
+  `@fastify/static`, registered **last** in `app.ts` so it can never shadow
+  an API route (verified directly — see Tests below). Resolves the dist
+  path relative to the compiled service location
+  (`service/dist/api/dashboardStatic.js` → repo root → `dashboard/dist`);
+  if the dashboard hasn't been built yet, logs a warning and skips
+  registration instead of crashing boot — the REST API and Stremio addon
+  surface work fine without it.
+- Dependencies pinned to Fastify-4-compatible major versions, **not**
+  latest: `@fastify/websocket@10.0.1` and `@fastify/static@7.0.4`. The
+  latest majors of both require Fastify 5 (this project is still on
+  Fastify 4) and fail loudly at boot with `FST_ERR_PLUGIN_VERSION_MISMATCH`
+  if installed carelessly — check a candidate's `fastify-plugin` peer
+  version against Fastify 4 (roughly `fastify-plugin: ^4.x`) before
+  upgrading either package.
+
+### Gotcha: `@fastify/websocket` plugin registration ordering (the real bug)
+
+`app.register(websocketPlugin)` followed **immediately, in the same
+synchronous tick**, by `app.get(path, { websocket: true }, handler)` looks
+correct and typechecks fine, but silently registers a *plain* HTTP route:
+the plugin's `onRoute` hook (the thing that rewrites the route to call your
+handler as `(socket, request)` instead of Fastify's normal
+`(request, reply)`) isn't attached yet, because `.register()` is
+asynchronous and Fastify only applies the hooks present *at the moment*
+`.get()` is called. The bug doesn't surface at boot or in a naive test —
+only when a real client actually connects, at which point the handler
+receives a `FastifyRequest` where it expects a `ws.WebSocket`, and
+`socket.send(...)` throws `TypeError: socket.send is not a function`,
+returned to the client as a `500` during the upgrade handshake. **This is
+exactly what the original `wsProgress.test.ts` draft missed**: it called
+`await app.register(websocket)` itself before calling
+`registerWsProgressRoute`, which — because it was awaited — worked fine,
+while `app.ts`'s real (unawaited) registration didn't. The tests were
+quietly exercising a different code path than production.
+
+Two ways to fix the ordering, only one of which is fully correct:
+
+- ❌ Nest the plugin + route inside one `app.register(async (instance) => {
+  await instance.register(websocketPlugin); instance.get(...); })`. This
+  *does* fix the ordering (avvio properly sequences nested registrations),
+  but silently creates a new encapsulation context — `injectWS` and
+  `websocketServer` end up decorated onto the inner `instance`, not the
+  outer `app`, breaking anything (tests, mainly) that expects them on the
+  instance you actually called `registerWsProgressRoute` with.
+- ✅ `app.register(websocketPlugin); app.after(() => { app.get(path, {
+  websocket: true }, handler); });` — `.after()` queues its callback to run
+  once everything registered before it has finished loading, **without**
+  creating a new encapsulation context. Ordering is correct *and*
+  `app.injectWS` stays on `app`. This is what `wsProgress.ts` does now.
+
+### Tests
+28 new (201 service + 10 addon total, dashboard has no test runner — see
+Deferred below): `wsProgress.test.ts` (now correctly exercises the same
+plugin-registration path `app.ts` uses — see the gotcha above);
+`diagnostics.test.ts` extended for the new HTML page (resolved base URL
+shown, fail badge when unresolvable, manifest-unreachable case);
+`settings.test.ts` (db + REST, including that `legalNoticeAcceptedAt`
+can't be set via PATCH); `dashboardStatic.test.ts` — the collision test is
+worth calling out specifically: registers a real `GET /health` route
+*and* a static file literally named `health` in the same dist directory,
+confirms the API route wins.
+
+### End-to-end verification performed
+Booted the real service and, over real HTTP/WS: `GET /` served the built
+dashboard's `index.html`; `GET /manifest.webmanifest` (PWA) and `GET
+/manifest.json` (the Stremio addon's real manifest) both resolved
+correctly at their distinct paths with no collision; `GET`/`PATCH
+/settings` round-tripped a change; `GET /diagnostics` rendered with the
+resolved base URL visible. Then, using the real `ws` npm package (not
+`.inject()`) against the real listening server: connected to
+`/ws/progress`, enqueued a job over REST, and confirmed the live
+WebSocket client received a snapshot containing that job — this is the
+check that failed before the plugin-registration fix and passed cleanly
+after it. All checks passed.
+
+### Deferred / not done in P9
+
+- No dashboard component/browser test runner — TypeScript compiles clean
+  and the Vite production build succeeds, plus the static-serving and API
+  layers are verified for real, but nothing renders the React tree in a
+  real or simulated DOM. Installing a browser-automation stack (Playwright/
+  Puppeteer) purely for this felt like disproportionate scope for a v1
+  personal-use dashboard; revisit if the UI grows complex enough that
+  manual verification stops being trustworthy.
+- No service worker / offline caching for the PWA — the manifest makes it
+  installable, but there's no cache-first asset strategy yet. The
+  dashboard needs the service reachable to do anything useful anyway
+  (it's a control panel, not offline-first content), so this was judged
+  low value for v1.
+- The dashboard's dev-server proxy (`vite.config.ts`) targets
+  `127.0.0.1:11470` (the plain-HTTP localhost listener) hardcoded — fine
+  for local development against a service running with default ports,
+  not configurable yet.
+
 ## Environment / gotchas learned so far (don't rediscover these)
 
 - **Git identity for this repo**: `VaibhavHiwale <vaibhavhiwale@outlook.com>`,
@@ -367,6 +507,29 @@ checks passed.
   guarantee dependency order). If you add a new workspace package, update both the
   root `package.json` build script and the consuming package's `tsconfig.json`
   `references`.
+- **`@fastify/websocket` plugin registration ordering (P9, cost real debugging
+  time)**: `app.register(websocketPlugin)` immediately followed, in the same
+  synchronous tick, by `app.get(path, { websocket: true }, handler)` typechecks
+  and boots fine but silently registers a *plain* HTTP route — the plugin's
+  `onRoute` hook that rewrites the handler to `(socket, request)` isn't attached
+  yet when `.get()` runs, so a real client connecting gets a `500` with
+  `socket.send is not a function` internally. Only shows up when something
+  actually connects — unit tests that `await app.register(websocket)` themselves
+  before calling the route-registering function can accidentally use a different
+  (working) sequencing than production and pass while the real app is broken.
+  Fix: `app.register(websocketPlugin); app.after(() => { app.get(...) });` —
+  `.after()` sequences correctly *without* creating a new encapsulation context
+  (a nested `app.register(async (instance) => ...)` also fixes the ordering but
+  moves `injectWS`/`websocketServer` onto the inner instance instead of `app`).
+  See `service/src/api/wsProgress.ts` docstring and the P9 section above for the
+  full story. **Lesson**: for any WS/streaming route, verify with a real client
+  against the real running service — `.inject()`-only tests can lie if they set
+  up plugin registration differently than `app.ts` does.
+- **Only pin `@fastify/*` plugin majors after checking their `fastify-plugin`
+  peer version** — `npm view <pkg> dependencies.fastify-plugin` should show
+  roughly `^4.x` for this project (Fastify 4). Latest majors of
+  `@fastify/websocket` and `@fastify/static` both target Fastify 5 and fail loudly
+  at boot (`FST_ERR_PLUGIN_VERSION_MISMATCH`) if installed without checking first.
 
 ## Useful commands
 

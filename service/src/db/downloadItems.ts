@@ -86,6 +86,17 @@ export function listAll(db: Database, opts: { status?: string } = {}): DownloadI
   return rows.map(toDownloadItem);
 }
 
+const ACTIVE_STATUSES = ["queued", "resolving", "downloading", "paused", "remuxing", "verifying"];
+
+/** Everything still in flight — feeds the WS progress broadcast (P9). Excludes ready/failed/cancelled/deleted, which don't change once they get there. */
+export function getActiveItems(db: Database): DownloadItem[] {
+  const placeholders = ACTIVE_STATUSES.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT ${FULL_ROW_COLUMNS} FROM download_items WHERE status IN (${placeholders}) ORDER BY priority DESC, added_at ASC`)
+    .all(...ACTIVE_STATUSES) as RawFullRow[];
+  return rows.map(toDownloadItem);
+}
+
 /** Oldest-first within the highest priority band — the real scheduler (priority weighting, concurrency) is P5; this is P3's minimal single-lane picker. */
 export function getNextQueued(db: Database): QueueRow | undefined {
   return db

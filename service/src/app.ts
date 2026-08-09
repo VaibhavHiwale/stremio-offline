@@ -2,12 +2,15 @@ import cors from "@fastify/cors";
 import { registerAddonRoutes } from "@stremio-offline/addon";
 import type { Database } from "better-sqlite3";
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
-import { buildHealthReport } from "./api/health.js";
+import { registerDashboardStatic } from "./api/dashboardStatic.js";
 import { registerDebridAccountsRoutes } from "./api/debridAccounts.js";
 import { registerDiagnosticsRoutes } from "./api/diagnostics.js";
+import { buildHealthReport } from "./api/health.js";
 import { registerDownloadsRoutes } from "./api/downloads.js";
 import { buildSignedFileUrl, registerFilesRoute } from "./api/files.js";
+import { registerSettingsRoutes } from "./api/settings.js";
 import { registerStorageTargetsRoutes } from "./api/storageTargets.js";
+import { registerWsProgressRoute } from "./api/wsProgress.js";
 import type { SubsystemStatus } from "@stremio-offline/shared";
 import { recordError } from "./observability/errorLog.js";
 import type { RemuxRunnerHandle } from "./queue/remuxRunner.js";
@@ -85,9 +88,27 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   registerDebridAccountsRoutes(app, { db: deps.db });
 
-  registerDiagnosticsRoutes(app, { storageRoot: deps.storageRoot });
+  const safeResolveBaseUrl = (req: FastifyRequest): string | null => {
+    try {
+      return resolveBaseUrl(req, deps.configuredBaseUrl);
+    } catch {
+      return null;
+    }
+  };
+
+  registerDiagnosticsRoutes(app, {
+    db: deps.db,
+    storageRoot: deps.storageRoot,
+    configuredBaseUrl: deps.configuredBaseUrl,
+    resolveBaseUrl: safeResolveBaseUrl,
+    getCertInfo: deps.getCertInfo,
+  });
 
   registerStorageTargetsRoutes(app, { db: deps.db });
+
+  registerSettingsRoutes(app, { db: deps.db });
+
+  registerWsProgressRoute(app, { db: deps.db });
 
   registerAddonRoutes(app, {
     db: deps.db,
@@ -103,14 +124,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       const baseUrl = resolveBaseUrl(req, deps.configuredBaseUrl);
       return buildSignedFileUrl(baseUrl, deps.fileTokenSecret, downloadItemId, FILE_URL_TTL_SECONDS, "subtitle", lang);
     },
-    resolveBaseUrl: (req: FastifyRequest) => {
-      try {
-        return resolveBaseUrl(req, deps.configuredBaseUrl);
-      } catch {
-        return null;
-      }
-    },
+    resolveBaseUrl: safeResolveBaseUrl,
   });
+
+  // Mounted last — nothing here should ever be able to shadow an API route above.
+  registerDashboardStatic(app, app.log);
 
   return app;
 }

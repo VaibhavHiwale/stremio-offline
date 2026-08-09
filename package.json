@@ -5,11 +5,13 @@
   "workspaces": [
     "shared",
     "addon",
-    "service"
+    "service",
+    "dashboard"
   ],
   "scripts": {
-    "build": "npm run build --workspace shared && npm run build --workspace addon && npm run build --workspace service",
+    "build": "npm run build --workspace shared && npm run build --workspace addon && npm run build --workspace dashboard && npm run build --workspace service",
     "dev:service": "npm run dev --workspace service",
+    "dev:dashboard": "npm run dev --workspace dashboard",
     "start:service": "npm run start --workspace service",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
