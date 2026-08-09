@@ -17,7 +17,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P5 Queue | ✅ done, pushed | commit `3f8cb8a` |
 | P6 Resolvers | ✅ done, pushed | commit `30ae4b4` — **unverified against real debrid APIs**, see below |
 | P7 Subtitles | ✅ done, pushed | commit `1e151d1` — see below, verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
-| P8 Storage | not started | |
+| P8 Storage | ✅ done, **not yet pushed** | see below — fully verified end-to-end, including the real background sweeper |
 | P9 Progress + dashboard | not started | |
 | P10 Episode auto-download | not started | |
 | P11 Resume playback | not started | |
@@ -226,6 +226,90 @@ row, `GET /subtitles/movie/:id.json` returned the real signed URL, and
 - No re-fetch/refresh mechanism if a subtitle turns out to be
   out-of-sync — `subtitle_langs` only ever grows, there's no way to clear
   a bad entry short of editing the DB directly.
+
+## P8 — Storage: done, fully verified (no caveats this time)
+
+Unlike P6/P7, nothing here depends on an external API or real account —
+every piece was exercised for real end-to-end, including the real
+background sweeper on its own schedule (not called directly).
+
+### Built
+- `db/storageTargets.ts` + `storage/targets.ts` — `storage_targets` had sat
+  completely unused since P0 (the table existed, nothing ever wrote to it,
+  every download silently used the string `"default"` with no backing row).
+  `ensureDefaultTarget(db, storageRoot)` now registers it for real at boot;
+  `refreshAllTargetUsage` updates `bytesFree`/`bytesTotal` for every
+  registered target via the new `diskspace.ts:getDiskUsage`, best-effort
+  (an unreachable path — e.g. an unplugged USB drive — just keeps its
+  last-known figures rather than erroring). **Deliberately no automatic
+  OS-wide volume enumeration** — CLAUDE.md §2's locked-in deployment
+  decision (separate always-on NAS/Pi, not co-located with Stremio) means
+  the operator already knows their own mount points; auto-discovering every
+  mounted filesystem and exposing it as a target without being asked would
+  be scope creep and a minor antipattern. `POST /storage/targets` (an
+  admin manually registering an external SD/USB/NAS path) covers the
+  "external SD/USB" part of this phase's brief instead.
+- `api/storageTargets.ts` — `GET/POST /storage/targets`, `GET
+  /storage/usage` (CLAUDE.md §8). `GET /storage/targets` returns
+  cached/last-known figures (fast); `GET /storage/usage` calls
+  `refreshAllTargetUsage` first (does the real `statfs` calls, so it's the
+  one to hit for an up-to-the-moment reading). `POST` rejects a path that
+  isn't a real, reachable, writable-checkable directory.
+- `db/downloadItems.ts:getAutoDeleteCandidates` + `storage/autodelete.ts` —
+  a `ready` row qualifies for cleanup when either (a) it's `watched` and
+  either its own `auto_delete_after_watch` or the global
+  `settings.auto_delete_after_watch` default is set, or (b)
+  `settings.auto_delete_after_days` is set and `completed_at` is older than
+  that many days — independent of watched status. `sweepAutoDelete` (one
+  pass, exported directly for deterministic tests, same pattern as
+  `processRemuxRow`) reuses P5's `cancelOrDeleteDownload` +
+  `storage/cleanupFiles.ts:cleanupDownloadFiles` — the exact same DB
+  transition and file-removal logic `DELETE /downloads/:id` uses, extracted
+  out of `api/downloads.ts` into its own module specifically so both
+  callers share one place that knows every location a download's bytes
+  could be sitting. `startAutoDeleteSweeper` polls in the background
+  (default 60s, overridable via `AUTO_DELETE_POLL_MS` for tests/E2E),
+  recording any unexpected exception via the error-capture system rather
+  than dying silently.
+- **No progress-reporting endpoint exists yet** to set `watched` for real —
+  `POST /downloads/:id/progress` is explicitly P11's job per CLAUDE.md §10
+  and this file's own P5 deferred-notes. Both the unit tests and the E2E
+  run set `watched`/`auto_delete_after_watch` directly via SQL, matching
+  how the sweeper's own tests do it — the sweep logic itself doesn't care
+  how those columns got set.
+
+### Tests
+20 new (181 total): `db/storageTargets.test.ts` (upsert-replaces, ordering,
+delete); `storage/targets.test.ts` (idempotent boot registration, usage
+refresh, unreachable-path graceful degradation); `storage/autodelete.test.ts`
+(every qualifying/non-qualifying combination — per-item flag, global
+default, age-based, and the "never touches a non-ready row" guard);
+`api/storageTargets.test.ts` (REST CRUD, unreachable-path rejection, usage
+refresh).
+
+### End-to-end verification performed
+Booted the real service and confirmed, over real HTTP: the default target
+is auto-registered at boot pointing at `STORAGE_ROOT`; `POST
+/storage/targets` registers a real external path; `GET /storage/usage`
+reflects both. Then ran a real download through the full pipeline to
+`ready`, set `watched`/`auto_delete_after_watch` directly (the only way
+available pre-P11), and waited on the **real background sweeper** — not a
+direct `sweepAutoDelete()` call — to pick it up on its own 1-second-overridden
+poll schedule and actually remove the published file from disk. All 8
+checks passed.
+
+### Deferred / not done in P8
+- Automatic OS-level volume/mount enumeration — a deliberate scope
+  decision (see above), not a gap to fill later unless the deployment
+  model changes.
+- `DELETE /storage/targets/:id` — CLAUDE.md §8 doesn't list it, and nothing
+  in this phase needed to remove a registered target once added; trivial
+  to add later following the exact pattern `DELETE /debrid-accounts/:service`
+  (P6) already established.
+- Auto-delete's `watched` trigger is untestable through a real client flow
+  until P11 adds the progress-reporting endpoint — the sweep mechanics
+  themselves are fully verified, but nothing in this codebase can set
+  `watched=true` through normal use yet.
 
 ## Environment / gotchas learned so far (don't rediscover these)
 

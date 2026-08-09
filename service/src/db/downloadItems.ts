@@ -114,6 +114,33 @@ export function getQueuedRows(db: Database, limit: number): QueueRow[] {
     .all(limit) as QueueRow[];
 }
 
+export interface AutoDeleteCandidate {
+  id: string;
+  filePathOriginal: string | null;
+  filePathWebReady: string | null;
+}
+
+/**
+ * Ready downloads eligible for cleanup — CLAUDE.md §7's `autoDeleteAfterWatch`
+ * (per-item, or the global `settings.auto_delete_after_watch` default) and
+ * `settings.auto_delete_after_days` (age-based, independent of watched
+ * status). A row only ever needs to satisfy one of the two conditions.
+ */
+export function getAutoDeleteCandidates(db: Database): AutoDeleteCandidate[] {
+  return db
+    .prepare(
+      `SELECT d.id AS id, d.file_path_original AS filePathOriginal, d.file_path_web_ready AS filePathWebReady
+       FROM download_items d, settings s
+       WHERE d.status = 'ready'
+         AND (
+           (d.watched = 1 AND (d.auto_delete_after_watch = 1 OR s.auto_delete_after_watch = 1))
+           OR (s.auto_delete_after_days IS NOT NULL AND d.completed_at IS NOT NULL
+               AND julianday('now') - julianday(d.completed_at) >= s.auto_delete_after_days)
+         )`,
+    )
+    .all() as AutoDeleteCandidate[];
+}
+
 /** Idempotent by (stremio_id, quality) — the schema's UNIQUE constraint makes a duplicate enqueue a no-op. */
 export function enqueueDownload(
   db: Database,

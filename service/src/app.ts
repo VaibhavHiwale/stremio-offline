@@ -7,6 +7,7 @@ import { registerDebridAccountsRoutes } from "./api/debridAccounts.js";
 import { registerDiagnosticsRoutes } from "./api/diagnostics.js";
 import { registerDownloadsRoutes } from "./api/downloads.js";
 import { buildSignedFileUrl, registerFilesRoute } from "./api/files.js";
+import { registerStorageTargetsRoutes } from "./api/storageTargets.js";
 import type { SubsystemStatus } from "@stremio-offline/shared";
 import { recordError } from "./observability/errorLog.js";
 import type { RemuxRunnerHandle } from "./queue/remuxRunner.js";
@@ -85,6 +86,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerDebridAccountsRoutes(app, { db: deps.db });
 
   registerDiagnosticsRoutes(app, { storageRoot: deps.storageRoot });
+
+  registerStorageTargetsRoutes(app, { db: deps.db });
 
   registerAddonRoutes(app, {
     db: deps.db,

@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { promises as fsp } from "node:fs";
 import type { Database } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import {
@@ -14,7 +13,7 @@ import {
 } from "../db/downloadItems.js";
 import type { RemuxRunnerHandle } from "../queue/remuxRunner.js";
 import type { SchedulerHandle } from "../queue/scheduler.js";
-import { partPath, remuxTempPath } from "../storage/paths.js";
+import { cleanupDownloadFiles } from "../storage/cleanupFiles.js";
 
 export interface DownloadsRouteDeps {
   db: Database;
@@ -55,19 +54,6 @@ function validateEnqueueBody(body: EnqueueBody): string | null {
     return "sourceUrl must be a magnet: URI when sourceKind is 'magnet' or 'debrid'";
   }
   return null;
-}
-
-async function cleanupFiles(
-  storageRoot: string,
-  row: { id: string; filePathOriginal: string | null; filePathWebReady: string | null },
-): Promise<void> {
-  const candidates = [
-    partPath(storageRoot, row.id),
-    remuxTempPath(storageRoot, row.id),
-    row.filePathOriginal,
-    row.filePathWebReady,
-  ].filter((p): p is string => Boolean(p));
-  await Promise.all(candidates.map((p) => fsp.rm(p, { force: true }).catch(() => undefined)));
 }
 
 /**
@@ -176,7 +162,7 @@ export function registerDownloadsRoutes(app: FastifyInstance, deps: DownloadsRou
     if (before.status === "downloading") deps.scheduler.abortRow(id);
     if (before.status === "remuxing") deps.remuxRunner.abortRow(id);
 
-    await cleanupFiles(deps.storageRoot, before);
+    await cleanupDownloadFiles(deps.storageRoot, before);
 
     return reply.send(getFullById(deps.db, id)!);
   });

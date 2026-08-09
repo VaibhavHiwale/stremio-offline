@@ -7,6 +7,8 @@ import { isWeeklyRollupDue, persistWeeklyRollup } from "./observability/weeklyRo
 import { reconcile } from "./queue/reconcile.js";
 import { startRemuxRunner } from "./queue/remuxRunner.js";
 import { startScheduler } from "./queue/scheduler.js";
+import { startAutoDeleteSweeper } from "./storage/autodelete.js";
+import { ensureDefaultTarget, refreshAllTargetUsage } from "./storage/targets.js";
 import { acquireHttpsTransport } from "./transport/certManager.js";
 import { loadOrCreateSecret } from "./transport/secretStore.js";
 
@@ -20,6 +22,8 @@ const SKIP_CERT_ACQUISITION = process.env.SKIP_CERT_ACQUISITION === "1";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ?? null;
 // Override point for tests/E2E — defaults to the real OpenSubtitles API inside subtitles/opensubtitles.ts when unset.
 const OPENSUBTITLES_BASE_URL = process.env.OPENSUBTITLES_BASE_URL;
+// Override point for E2E — defaults to startAutoDeleteSweeper's own 60s when unset.
+const AUTO_DELETE_POLL_MS = process.env.AUTO_DELETE_POLL_MS ? Number(process.env.AUTO_DELETE_POLL_MS) : undefined;
 
 const loggerOptions = {
   level: process.env.LOG_LEVEL ?? "info",
@@ -31,6 +35,11 @@ async function main(): Promise<void> {
   const db = openDb(DB_PATH);
   const fileTokenSecret = loadOrCreateSecret(join(STORAGE_ROOT, ".offline", "file-token-secret"));
   const installIdHash = getInstallIdHash(STORAGE_ROOT);
+
+  // P8: the server's own storage root is always a registered target;
+  // external SD/USB/NAS paths are added later via POST /storage/targets.
+  ensureDefaultTarget(db, STORAGE_ROOT);
+  void refreshAllTargetUsage(db);
 
   // The DB is a cache of filesystem reality, never the other way round —
   // CLAUDE.md §4. Must run before the queue runner starts pulling jobs.
@@ -50,6 +59,9 @@ async function main(): Promise<void> {
   const remuxRunnerDeps: Parameters<typeof startRemuxRunner>[0] = { db, storageRoot: STORAGE_ROOT, installIdHash };
   if (OPENSUBTITLES_BASE_URL) remuxRunnerDeps.subtitlesBaseUrl = OPENSUBTITLES_BASE_URL;
   const remuxRunner = startRemuxRunner(remuxRunnerDeps);
+  const autoDeleteDeps: Parameters<typeof startAutoDeleteSweeper>[0] = { db, storageRoot: STORAGE_ROOT, installIdHash };
+  if (AUTO_DELETE_POLL_MS !== undefined) autoDeleteDeps.idlePollMs = AUTO_DELETE_POLL_MS;
+  const autoDeleteSweeper = startAutoDeleteSweeper(autoDeleteDeps);
 
   // Weekly error-summary artifact — CLAUDE.md-adjacent observability, not a
   // spec'd phase. Regenerate at boot if it's missing/stale, then check once
@@ -139,6 +151,7 @@ async function main(): Promise<void> {
       // picks up wherever it left off.
       await scheduler.stop();
       await remuxRunner.stop();
+      await autoDeleteSweeper.stop();
       await httpApp.close();
       if (httpsApp) await httpsApp.close();
       closeDb();

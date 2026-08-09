@@ -10,6 +10,16 @@ export async function getFreeBytes(path: string): Promise<number | null> {
   }
 }
 
+/** Free and total capacity for the filesystem containing `path` — feeds StorageTarget.bytesFree/bytesTotal. Null if unavailable (e.g. Windows, where fs.statfs isn't supported — see PROGRESS.md's environment notes). */
+export async function getDiskUsage(path: string): Promise<{ freeBytes: number; totalBytes: number } | null> {
+  try {
+    const stats = await statfs(path);
+    return { freeBytes: stats.bsize * stats.bavail, totalBytes: stats.bsize * stats.blocks };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Pre-flight/periodic disk-space guard — CLAUDE.md §4: free space must be at
  * least expectedSize × 1.3 (headroom for the P4 remux step) before/while a
