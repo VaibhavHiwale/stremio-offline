@@ -20,7 +20,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P8 Storage | ✅ done, pushed | commit `98022a1` — see below, fully verified end-to-end, including the real background sweeper |
 | P9 Progress + dashboard | ✅ done, pushed | commit `e6557b7` — real E2E caught and fixed a genuine WS registration bug that unit tests alone missed |
 | P10 Episode auto-download | ✅ done, pushed | commit `96e337c` — real E2E against a fake local source addon, full download→remux→ready→auto-enqueue chain |
-| P11 Resume playback | not started | |
+| P11 Resume playback | ✅ done, **not yet pushed** | see below — `videoHash`/`videoSize`/real `filename` in `behaviorHints`, plus `POST /downloads/:id/progress` |
 
 Repo: https://github.com/VaibhavHiwale/stremio-offline (remote `origin`, branch `master`).
 P0–P4 work is committed locally (P4 landed via a squash-merge from
@@ -587,6 +587,123 @@ passed.
   CLAUDE.md description scopes it specifically to auto-download, not to a
   manual "browse available sources" flow. `resolvers/addonClient.ts` is
   already the right module to build that on top of when it's needed.
+
+## P11 — Resume playback: done. This closes out CLAUDE.md's P0–P11 build order
+
+CLAUDE.md §10 names this exactly: *"`lastPositionSeconds`, correct
+`videoHash`/`videoSize`/`filename` in `behaviorHints` so Stremio's own
+resume recognizes the session."* `lastPositionSeconds`/`watched` have
+existed as DB columns since P0 and been *read* by P8's auto-delete sweep,
+but nothing could ever *write* them from a real playback session until
+now — P8's own PROGRESS.md entry flagged this gap directly: *"Auto-
+delete's `watched` trigger is untestable through a real client flow until
+P11 adds the progress-reporting endpoint."*
+
+### Built
+
+- `media/videoHash.ts` — `computeVideoHash`, the classic OpenSubtitles/
+  Stremio 64-bit file hash (file size + sum of the first and last 64KB as
+  little-endian 64-bit words, wrapped mod 2⁶⁴). This is *not* the P7
+  subtitle-lookup mechanism (that's IMDb-id search, unrelated) — its only
+  purpose is letting Stremio's client recognize "this is the same file I
+  was already playing" across requests/sessions. Returns `null` for files
+  under 128KB — the reference algorithm has no defined behavior below
+  that floor. A real movie/episode is always far larger; the floor only
+  ever matters for this repo's own tiny synthetic test fixtures (which
+  therefore get `video_hash: NULL`, handled as a normal, expected case
+  everywhere downstream, not an error).
+- `shared/types.ts` / `schema.sql` — `DownloadItem.videoHash` /
+  `.videoSize`, `download_items.video_hash` / `.video_size`. Following this
+  project's established convention (no migration runner exists —
+  `schema.sql` is the single source of truth, same as every prior phase
+  that added columns).
+- `queue/remuxRunner.ts` — computes both, from the **published** file
+  (after the atomic rename, not the pre-rename staging path) — so a hash
+  ever recorded on a row always matches what `/files/:id` actually serves.
+  Threaded through `markReady`'s patch, which now requires them (there's
+  no partial-ready state where a file exists but wasn't hashed).
+- `db/downloadItems.ts` — `recordProgress(db, id, {positionSeconds,
+  durationSeconds})`: updates `last_position_seconds`/`last_watched_at`
+  unconditionally, and flips `watched` to `1` once `positionSeconds`
+  crosses 90% of the supplied `durationSeconds` — a common "close enough
+  to done" threshold (end credits, etc.) — via a single `CASE WHEN`
+  clause that only ever sets `watched`, never clears it (rewinding after
+  finishing must not un-mark a title as watched, or P8's auto-delete-
+  after-watch sweep would un-eligible a title the user already finished).
+- `api/downloads.ts` — `POST /downloads/:id/progress` (CLAUDE.md §8:
+  "player reports position"). Note on scope: Stremio's *built-in* player
+  has no protocol hook to call this automatically — the addon/companion-
+  service split (CLAUDE.md §1) means Stremio manages its own local resume
+  state independently. This endpoint exists for whatever *does* have
+  positionSeconds to report (a future in-dashboard player, an external
+  script, a browser extension) — built to spec now so P8's watched-based
+  auto-delete has a real, working trigger, rather than staying permanently
+  untestable through any real client flow.
+- `addon/src/protocol.ts` — `StreamBehaviorHints` gained `videoSize`/
+  `videoHash`. `addon/src/repository.ts` — `DownloadItemRow` gained the
+  same two columns. `addon/src/handlers/stream.ts` — fixed a real (if
+  minor) pre-existing bug along the way: the `ready` stream entry's
+  `behaviorHints.filename` was set to `row.title` (a display string like
+  `"The Matrix"`, no extension) instead of the actual served file's
+  basename (`"The Matrix (1999).mp4"`) — CLAUDE.md explicitly calls out
+  "correct `filename`", and Stremio's file-identity matching needs the
+  real one. `videoSize`/`videoHash` are only added to `behaviorHints` when
+  present on the row (omitted, not sent as `null`), matching this
+  codebase's general `exactOptionalPropertyTypes` convention of "if (x)
+  obj.field = x" throughout.
+
+### Tests
+
+15 new (248 service + 13 addon total): `media/videoHash.test.ts` — the
+most important cases are the ones that verify the algorithm against
+values computable independently of the implementation (a zero-filled
+131072-byte file hashes to its own size in hex, since both chunk sums are
+zero — not a value derived by calling the function under test itself),
+plus sensitivity checks (changing one byte in the head or tail chunk
+changes the hash; changing a byte strictly in the middle of a 4-chunk-
+sized file does not); `addon/src/handlers/stream.test.ts` (new file — the
+addon package's stream handler had no dedicated test file before this)
+covers the filename-basename fix, videoHash/videoSize present vs. omitted,
+and the `filePathWebReady`-missing fallback; `api/downloads.test.ts`
+extended with 6 `POST /downloads/:id/progress` cases including the
+never-un-marks-watched behavior specifically.
+
+### End-to-end verification performed
+
+Booted the real compiled service, accepted the legal notice via `POST
+/configure/accept` (required before the addon surface returns anything),
+and downloaded a **real ffmpeg-generated fixture sized to exceed 128KB on
+purpose** (the repo's other test fixtures are deliberately tiny and would
+have exercised the `null`-hash path instead) through the full real
+download → remux → verify → publish pipeline. Confirmed: a real 16-hex-
+character `videoHash` was computed and `videoSize` matched the actual
+published file's byte size on disk; `GET /stream/movie/:id.json` (the
+real addon endpoint, not a direct DB read) surfaced both correctly in
+`behaviorHints`, with `filename` ending in `.mp4` and matching neither the
+display title nor a placeholder; `POST /downloads/:id/progress` correctly
+left `watched: false` below the 90% threshold, flipped it to `true` on
+crossing it, and — the case most worth checking for real — stayed `true`
+after a subsequent rewind to the start. All 12 checks passed.
+
+### Deferred / not done in P11
+
+- No client actually calls `POST /downloads/:id/progress` yet — there's no
+  in-dashboard video player (P9's dashboard is a management UI: download
+  list + settings, not a playback surface) and Stremio's own built-in
+  player has no hook to call an addon's custom endpoints during playback.
+  The endpoint is real, tested, and E2E-verified against a client that
+  simulates one, but nothing in this repo calls it during actual use yet.
+- `lastPositionSeconds` isn't surfaced anywhere in the dashboard UI (no
+  "resume from 12:34" affordance) — P9's `DownloadCard` was built before
+  this field had any real writer; revisit once something reports progress.
+- The OpenSubtitles-style hash is unverified against Stremio's actual
+  client-side resume-matching behavior (no way to drive real Stremio
+  client software from this environment) — the algorithm itself is
+  verified correct against independently-computable values (see Tests
+  above), but "Stremio's own resume recognizes the session" per CLAUDE.md's
+  phrasing is an integration claim this repo cannot fully close the loop
+  on without a real device, same category of gap as the acceptance matrix
+  in CLAUDE.md §9 generally.
 
 ## Environment / gotchas learned so far (don't rediscover these)
 

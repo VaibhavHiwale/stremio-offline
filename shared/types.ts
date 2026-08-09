@@ -64,6 +64,10 @@ export interface DownloadItem {
   filePathOriginal: string | null;
   filePathWebReady: string | null;
   sha256: string | null;
+  /** OpenSubtitles-style 64-bit file hash of the web-ready MP4 — CLAUDE.md §10 P11: lets Stremio's own resume feature recognize the session. Null for files under 128KB (the algorithm's own defined floor — never happens for a real movie/episode, only tiny synthetic test fixtures). */
+  videoHash: string | null;
+  /** Byte size of the web-ready MP4 — paired with videoHash in `behaviorHints`, same resume-recognition purpose. */
+  videoSize: number | null;
   subtitleLangs: string[];
   attemptCount: number;
   lastError: string | null;

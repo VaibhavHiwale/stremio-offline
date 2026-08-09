@@ -209,3 +209,67 @@ test("DELETE /downloads/:id 404s for an unknown id", async () => {
   const res = await app.inject({ method: "DELETE", url: "/downloads/no-such-id" });
   assert.equal(res.statusCode, 404);
 });
+
+test("POST /downloads/:id/progress records the position and returns the full item", async () => {
+  const { app } = buildTestApp();
+  const created = await app.inject({ method: "POST", url: "/downloads", payload: ENQUEUE_BODY });
+  const id = (created.json() as DownloadItem).id;
+
+  const res = await app.inject({ method: "POST", url: `/downloads/${id}/progress`, payload: { positionSeconds: 120 } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as DownloadItem;
+  assert.equal(body.lastPositionSeconds, 120);
+  assert.equal(body.watched, false, "no durationSeconds supplied, so the watched threshold can't be evaluated");
+});
+
+test("POST /downloads/:id/progress marks watched once position crosses 90% of the reported duration", async () => {
+  const { app } = buildTestApp();
+  const created = await app.inject({ method: "POST", url: "/downloads", payload: ENQUEUE_BODY });
+  const id = (created.json() as DownloadItem).id;
+
+  const notYet = await app.inject({
+    method: "POST",
+    url: `/downloads/${id}/progress`,
+    payload: { positionSeconds: 80, durationSeconds: 100 },
+  });
+  assert.equal((notYet.json() as DownloadItem).watched, false);
+
+  const crossed = await app.inject({
+    method: "POST",
+    url: `/downloads/${id}/progress`,
+    payload: { positionSeconds: 91, durationSeconds: 100 },
+  });
+  assert.equal((crossed.json() as DownloadItem).watched, true);
+});
+
+test("POST /downloads/:id/progress never un-marks watched once set", async () => {
+  const { app } = buildTestApp();
+  const created = await app.inject({ method: "POST", url: "/downloads", payload: ENQUEUE_BODY });
+  const id = (created.json() as DownloadItem).id;
+
+  await app.inject({ method: "POST", url: `/downloads/${id}/progress`, payload: { positionSeconds: 95, durationSeconds: 100 } });
+  const rewound = await app.inject({
+    method: "POST",
+    url: `/downloads/${id}/progress`,
+    payload: { positionSeconds: 5, durationSeconds: 100 },
+  });
+  assert.equal((rewound.json() as DownloadItem).watched, true, "rewinding to the start after finishing must not un-mark watched");
+});
+
+test("POST /downloads/:id/progress rejects a missing/invalid positionSeconds", async () => {
+  const { app } = buildTestApp();
+  const created = await app.inject({ method: "POST", url: "/downloads", payload: ENQUEUE_BODY });
+  const id = (created.json() as DownloadItem).id;
+
+  const missing = await app.inject({ method: "POST", url: `/downloads/${id}/progress`, payload: {} });
+  assert.equal(missing.statusCode, 400);
+
+  const negative = await app.inject({ method: "POST", url: `/downloads/${id}/progress`, payload: { positionSeconds: -5 } });
+  assert.equal(negative.statusCode, 400);
+});
+
+test("POST /downloads/:id/progress 404s for an unknown id", async () => {
+  const { app } = buildTestApp();
+  const res = await app.inject({ method: "POST", url: "/downloads/no-such-id/progress", payload: { positionSeconds: 10 } });
+  assert.equal(res.statusCode, 404);
+});

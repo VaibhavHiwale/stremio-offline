@@ -1,7 +1,8 @@
+import { basename } from "node:path";
 import type { Database } from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { queryByStremioId, queuePosition, type DownloadItemRow } from "../repository.js";
-import type { StreamEntry, StreamResponse } from "../protocol.js";
+import type { StreamBehaviorHints, StreamEntry, StreamResponse } from "../protocol.js";
 
 export interface StreamRouteDeps {
   db: Database;
@@ -44,12 +45,23 @@ function formatEta(seconds: number | null): string {
 function buildStreamEntries(req: FastifyRequest, row: DownloadItemRow, deps: StreamRouteDeps): StreamEntry[] {
   switch (row.status) {
     case "ready": {
+      // CLAUDE.md §10 P11: a real filename (the actual served file's
+      // basename, not the display title) plus videoHash/videoSize let
+      // Stremio's own resume feature recognize this exact file across
+      // sessions. videoHash is null for files under 128KB — see
+      // media/videoHash.ts — so it's only included when present.
+      const behaviorHints: StreamBehaviorHints = {
+        filename: row.filePathWebReady ? basename(row.filePathWebReady) : row.title,
+      };
+      if (row.videoSize !== null) behaviorHints.videoSize = row.videoSize;
+      if (row.videoHash !== null) behaviorHints.videoHash = row.videoHash;
+
       const entries: StreamEntry[] = [
         {
           name: `▶️ Play offline · ${row.quality}`,
           title: row.title,
           url: deps.buildFileUrl(req, row.id),
-          behaviorHints: { filename: row.title },
+          behaviorHints,
         },
       ];
       // Rule 1: "optionally offer the original as a second entry ... for

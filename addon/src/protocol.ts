@@ -54,6 +54,9 @@ export interface StreamBehaviorHints {
   notWebReady?: boolean;
   bingeGroup?: string;
   filename?: string;
+  /** CLAUDE.md §10 P11: lets Stremio's own resume feature recognize the same file across sessions. */
+  videoSize?: number;
+  videoHash?: string;
 }
 
 export interface StreamEntry {

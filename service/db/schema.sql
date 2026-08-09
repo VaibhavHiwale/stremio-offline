@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS download_items (
   file_path_original    TEXT,
   file_path_web_ready   TEXT,
   sha256                TEXT,
+  video_hash            TEXT,
+  video_size            INTEGER,
   subtitle_langs        TEXT NOT NULL DEFAULT '[]', -- JSON array
   attempt_count         INTEGER NOT NULL DEFAULT 0,
   last_error            TEXT,

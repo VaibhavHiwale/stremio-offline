@@ -7,6 +7,7 @@ import {
   getFullById,
   listAll,
   pauseDownload,
+  recordProgress,
   resumeDownload,
   retryDownload,
   setPriority,
@@ -145,6 +146,32 @@ export function registerDownloadsRoutes(app: FastifyInstance, deps: DownloadsRou
       const item = getFullById(deps.db, id);
       if (!item) return reply.code(404).send({ error: "not found" });
       return reply.send(item);
+    },
+  );
+
+  /**
+   * CLAUDE.md §8: "player reports position." Whatever is actually playing
+   * the file (dashboard player, external player script, etc.) calls this
+   * with where playback got to — Stremio's own built-in player has no
+   * protocol hook for this, so this only ever reflects what a client
+   * chooses to report. Feeds `lastPositionSeconds`/`watched`, which in turn
+   * feeds P8's auto-delete-after-watch sweep.
+   */
+  app.post<{ Params: { id: string }; Body: { positionSeconds?: number; durationSeconds?: number } }>(
+    "/downloads/:id/progress",
+    async (req, reply) => {
+      const { positionSeconds, durationSeconds } = req.body ?? {};
+      if (typeof positionSeconds !== "number" || !Number.isFinite(positionSeconds) || positionSeconds < 0) {
+        return reply.code(400).send({ error: "positionSeconds must be a non-negative number" });
+      }
+      if (durationSeconds !== undefined && (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds) || durationSeconds < 0)) {
+        return reply.code(400).send({ error: "durationSeconds must be a non-negative number when provided" });
+      }
+
+      const result = recordProgress(deps.db, req.params.id, { positionSeconds, durationSeconds: durationSeconds ?? null });
+      if (result === "not-found") return reply.code(404).send({ error: "not found" });
+
+      return reply.send(getFullById(deps.db, req.params.id)!);
     },
   );
 

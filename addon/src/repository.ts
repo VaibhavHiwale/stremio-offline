@@ -18,6 +18,8 @@ export interface DownloadItemRow {
   etaSeconds: number | null;
   filePathOriginal: string | null;
   filePathWebReady: string | null;
+  videoHash: string | null;
+  videoSize: number | null;
   subtitleLangsRaw: string;
   priority: number;
   addedAt: string;
@@ -28,6 +30,7 @@ const ROW_COLUMNS = `
   quality, status, progress_pct AS progressPct, bytes_downloaded AS bytesDownloaded,
   bytes_total AS bytesTotal, speed_bps AS speedBps, eta_seconds AS etaSeconds,
   file_path_original AS filePathOriginal, file_path_web_ready AS filePathWebReady,
+  video_hash AS videoHash, video_size AS videoSize,
   subtitle_langs AS subtitleLangsRaw, priority, added_at AS addedAt
 `;
 

@@ -87,7 +87,7 @@ test("pauseDownload: queued/downloading -> paused; rejects other states; 404s on
   assert.equal(pauseDownload(db, "queued-1"), "ok");
   assert.equal(getById(db, "queued-1")!.status, "paused");
 
-  markReady(db, "queued-1", { filePathWebReady: "/x.mp4" });
+  markReady(db, "queued-1", { filePathWebReady: "/x.mp4", videoHash: null, videoSize: 1234 });
   assert.equal(pauseDownload(db, "queued-1"), "invalid-state");
 
   assert.equal(pauseDownload(db, "no-such-id"), "not-found");
@@ -132,7 +132,7 @@ test("cancelOrDeleteDownload: in-flight statuses become cancelled, ready becomes
   const db = freshDb();
   enqueueDownload(db, { ...BASE_ITEM, id: "queued-1" });
   enqueueDownload(db, { ...BASE_ITEM, id: "ready-1", stremioId: "tt-ready" });
-  markReady(db, "ready-1", { filePathWebReady: "/x.mp4" });
+  markReady(db, "ready-1", { filePathWebReady: "/x.mp4", videoHash: null, videoSize: 1234 });
 
   assert.deepEqual(cancelOrDeleteDownload(db, "queued-1"), { status: "cancelled" });
   assert.deepEqual(cancelOrDeleteDownload(db, "ready-1"), { status: "deleted" });
@@ -158,7 +158,7 @@ test("a cancelled row cannot be resurrected by a late-finishing job's completion
   markAwaitingRemux(db, "row-1", { filePathOriginal: "/x.mkv", bytesDownloaded: 10, bytesTotal: 10, sha256: "abc" });
   assert.equal(getById(db, "row-1")!.status, "cancelled");
 
-  markReady(db, "row-1", { filePathWebReady: "/x.mp4" });
+  markReady(db, "row-1", { filePathWebReady: "/x.mp4", videoHash: null, videoSize: 1234 });
   assert.equal(getById(db, "row-1")!.status, "cancelled");
 });
 

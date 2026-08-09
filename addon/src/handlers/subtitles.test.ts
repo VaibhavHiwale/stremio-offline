@@ -28,6 +28,8 @@ function freshDb(): Database.Database {
       eta_seconds INTEGER,
       file_path_original TEXT,
       file_path_web_ready TEXT,
+      video_hash TEXT,
+      video_size INTEGER,
       subtitle_langs TEXT NOT NULL DEFAULT '[]',
       priority INTEGER NOT NULL DEFAULT 0,
       added_at TEXT NOT NULL

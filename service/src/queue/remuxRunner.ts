@@ -8,6 +8,7 @@ import { decideRemuxPlan } from "../media/decision.js";
 import { probeFile } from "../media/probe.js";
 import { runFfmpeg } from "../media/remux.js";
 import { verifyRemuxOutput } from "../media/verify.js";
+import { computeVideoHash } from "../media/videoHash.js";
 import { recordError } from "../observability/errorLog.js";
 import { triggerAutoDownloadNextEpisodes } from "./autoDownload.js";
 import { computeLibraryPath } from "../storage/libraryPath.js";
@@ -111,7 +112,11 @@ export async function processRemuxRow(deps: RemuxRunnerDeps, row: QueueRow): Pro
   await fsp.mkdir(dirname(finalPath), { recursive: true });
   await fsp.rename(tempOut, finalPath); // atomic within a filesystem — CLAUDE.md §4
 
-  markReady(deps.db, row.id, { filePathWebReady: finalPath });
+  // CLAUDE.md §10 P11: computed from the actual served file, after the
+  // atomic rename — never from the pre-rename staging path, so a hash
+  // recorded on the row always matches what /files/:id will actually serve.
+  const [videoHash, { size: videoSize }] = await Promise.all([computeVideoHash(finalPath), fsp.stat(finalPath)]);
+  markReady(deps.db, row.id, { filePathWebReady: finalPath, videoHash, videoSize });
 
   await fetchSubtitlesBestEffort(deps, row, finalPath);
   await triggerAutoDownloadNextEpisodeBestEffort(deps, row);

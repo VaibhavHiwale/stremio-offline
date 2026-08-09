@@ -54,6 +54,7 @@ const FULL_ROW_COLUMNS = `
   progress_pct AS progressPct, bytes_downloaded AS bytesDownloaded, bytes_total AS bytesTotal,
   speed_bps AS speedBps, eta_seconds AS etaSeconds, storage_target_id AS storageTargetId,
   file_path_original AS filePathOriginal, file_path_web_ready AS filePathWebReady, sha256,
+  video_hash AS videoHash, video_size AS videoSize,
   subtitle_langs AS subtitleLangs, attempt_count AS attemptCount, last_error AS lastError,
   retryable_error AS retryableError, watched, last_position_seconds AS lastPositionSeconds,
   last_watched_at AS lastWatchedAt, auto_delete_after_watch AS autoDeleteAfterWatch,
@@ -250,13 +251,47 @@ export function incrementAttempt(db: Database, id: string): void {
   db.prepare(`UPDATE download_items SET attempt_count = attempt_count + 1 WHERE id = ?`).run(id);
 }
 
-/** Remux verified and published into the library — the file is now playable. */
-export function markReady(db: Database, id: string, patch: { filePathWebReady: string }): void {
+/**
+ * Remux verified and published into the library — the file is now
+ * playable. `videoHash`/`videoSize` (CLAUDE.md §10 P11) are optional
+ * because `computeVideoHash` returns null for files under 128KB (only
+ * ever tiny synthetic test fixtures — see media/videoHash.ts).
+ */
+export function markReady(
+  db: Database,
+  id: string,
+  patch: { filePathWebReady: string; videoHash: string | null; videoSize: number },
+): void {
   db.prepare(
     `UPDATE download_items
-     SET status = 'ready', file_path_web_ready = ?, completed_at = datetime('now'), last_error = NULL
+     SET status = 'ready', file_path_web_ready = ?, video_hash = ?, video_size = ?,
+         completed_at = datetime('now'), last_error = NULL
      WHERE id = ? AND ${NOT_CANCELLED_OR_DELETED}`,
-  ).run(patch.filePathWebReady, id);
+  ).run(patch.filePathWebReady, patch.videoHash, patch.videoSize, id);
+}
+
+/**
+ * `POST /downloads/:id/progress` — CLAUDE.md §8: "player reports position."
+ * Marks `watched` once positionSeconds crosses 90% of the reported
+ * duration — a common "close enough to done" threshold (credits, etc.) —
+ * and never un-marks it once set, matching every other one-way status
+ * transition in this file.
+ */
+export function recordProgress(
+  db: Database,
+  id: string,
+  patch: { positionSeconds: number; durationSeconds: number | null },
+): "ok" | "not-found" {
+  const row = getById(db, id);
+  if (!row) return "not-found";
+
+  const crossedWatchedThreshold = patch.durationSeconds !== null && patch.positionSeconds >= patch.durationSeconds * 0.9;
+  db.prepare(
+    `UPDATE download_items
+     SET last_position_seconds = ?, last_watched_at = datetime('now'), watched = CASE WHEN ? THEN 1 ELSE watched END
+     WHERE id = ?`,
+  ).run(patch.positionSeconds, crossedWatchedThreshold ? 1 : 0, id);
+  return "ok";
 }
 
 /**
