@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -27,7 +27,15 @@ function getFullRow(
 
 function insertRemuxingRow(
   db: ReturnType<typeof createDbConnection>,
-  row: { id: string; title: string; filePathOriginal: string; type?: "movie" | "series"; season?: number | null; episode?: number | null },
+  row: {
+    id: string;
+    title: string;
+    filePathOriginal: string;
+    type?: "movie" | "series";
+    season?: number | null;
+    episode?: number | null;
+    stremioId?: string;
+  },
 ) {
   db.prepare(
     `INSERT INTO download_items
@@ -37,7 +45,7 @@ function insertRemuxingRow(
         'remuxing', 'default', ?, datetime('now'))`,
   ).run(
     row.id,
-    row.id,
+    row.stremioId ?? row.id,
     row.type ?? "movie",
     row.title,
     row.season ?? null,
@@ -106,4 +114,78 @@ test("a row with no file_path_original recorded fails immediately without touchi
   await processRemuxRow({ db, storageRoot }, getById(db, "movie-4")!);
 
   assert.equal(getFullRow(db, "movie-4").status, "failed");
+});
+
+function jsonResponse(body: unknown): Response {
+  return { ok: true, status: 200, json: async () => body } as Response;
+}
+
+test("P7: fetches subtitles for the configured languages after a successful publish", async () => {
+  const { db, storageRoot } = freshEnv();
+  db.prepare("UPDATE settings SET open_subtitles_api_key = 'test-key', subtitle_langs = '[\"en\"]' WHERE id = 1").run();
+
+  const original = join(storageRoot, "downloaded.mp4");
+  await generateH264Aac(original, 1);
+  insertRemuxingRow(db, { id: "movie-5", title: "Subtitled Movie", filePathOriginal: original, stremioId: "tt0903747" });
+
+  const fakeFetch = (async (url: string | URL) => {
+    const u = url.toString();
+    if (u.includes("/subtitles?")) {
+      return jsonResponse({ data: [{ attributes: { release: "R", download_count: 1, files: [{ file_id: 1 }] } }] });
+    }
+    if (u.endsWith("/download")) return jsonResponse({ link: "https://fake.opensubtitles.example/dl/1.srt" });
+    if (u === "https://fake.opensubtitles.example/dl/1.srt") {
+      return { ok: true, status: 200, text: async () => "1\n00:00:01,000 --> 00:00:02,000\nHi\n" } as unknown as Response;
+    }
+    throw new Error(`unexpected URL: ${u}`);
+  }) as unknown as typeof fetch;
+
+  await processRemuxRow({ db, storageRoot, subtitlesBaseUrl: "https://fake.opensubtitles.example", fetchImpl: fakeFetch }, getById(db, "movie-5")!);
+
+  const row = getFullRow(db, "movie-5");
+  assert.equal(row.status, "ready");
+  const sidecarFile = row.filePathWebReady!.replace(/\.mp4$/, ".en.srt");
+  assert.equal(existsSync(sidecarFile), true);
+  assert.equal(readFileSync(sidecarFile, "utf8"), "1\n00:00:01,000 --> 00:00:02,000\nHi\n");
+
+  const dbRow = db.prepare("SELECT subtitle_langs AS value FROM download_items WHERE id = 'movie-5'").get() as { value: string };
+  assert.deepEqual(JSON.parse(dbRow.value), ["en"]);
+});
+
+test("P7: a subtitle fetch failure never affects the download's ready status", async () => {
+  const { db, storageRoot } = freshEnv();
+  db.prepare("UPDATE settings SET open_subtitles_api_key = 'test-key', subtitle_langs = '[\"en\"]' WHERE id = 1").run();
+
+  const original = join(storageRoot, "downloaded.mp4");
+  await generateH264Aac(original, 1);
+  insertRemuxingRow(db, { id: "movie-6", title: "No Subs Found", filePathOriginal: original, stremioId: "tt1111111" });
+
+  const fakeFetch = (async () => {
+    throw new Error("network is down");
+  }) as unknown as typeof fetch;
+
+  await processRemuxRow({ db, storageRoot, subtitlesBaseUrl: "https://fake.opensubtitles.example", fetchImpl: fakeFetch }, getById(db, "movie-6")!);
+
+  const row = getFullRow(db, "movie-6");
+  assert.equal(row.status, "ready", "a subtitle-fetch network error must not fail the download itself");
+});
+
+test("P7: subtitle fetching is skipped entirely when no OpenSubtitles key is configured", async () => {
+  const { db, storageRoot } = freshEnv();
+  // No open_subtitles_api_key set — settings default to NULL.
+
+  const original = join(storageRoot, "downloaded.mp4");
+  await generateH264Aac(original, 1);
+  insertRemuxingRow(db, { id: "movie-7", title: "No Key Configured", filePathOriginal: original, stremioId: "tt2222222" });
+
+  let fetchCalled = false;
+  const fakeFetch = (async () => {
+    fetchCalled = true;
+    return jsonResponse({ data: [] });
+  }) as unknown as typeof fetch;
+
+  await processRemuxRow({ db, storageRoot, fetchImpl: fakeFetch }, getById(db, "movie-7")!);
+
+  assert.equal(getFullRow(db, "movie-7").status, "ready");
+  assert.equal(fetchCalled, false, "no OpenSubtitles call should happen without a configured key");
 });

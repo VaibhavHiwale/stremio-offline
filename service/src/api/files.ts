@@ -1,9 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, readFileSync, statSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import type { Database } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
+import { sidecarPath } from "../subtitles/sidecar.js";
 import { signFileToken, verifyFileToken } from "../transport/signedToken.js";
+
+const LANG_CODE_RE = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/;
 
 interface ByteRange {
   start: number;
@@ -71,18 +74,21 @@ function buildMultipartByterangesStream(
   return output;
 }
 
-export type FileVariant = "web-ready" | "original";
+export type FileVariant = "web-ready" | "original" | "subtitle";
 
-/** The variant isn't part of the signed token — both files belong to the same authorized download item, so one token covers either. */
+/** The variant isn't part of the signed token — every variant of a given id belongs to the same authorized download item, so one token covers all of them. */
 export function buildSignedFileUrl(
   baseUrl: string,
   secret: string,
   id: string,
   ttlSeconds: number,
   variant: FileVariant = "web-ready",
+  lang?: string,
 ): string {
   const { token, expiresAt } = signFileToken(secret, id, ttlSeconds);
-  const variantParam = variant === "original" ? "&variant=original" : "";
+  let variantParam = "";
+  if (variant === "original") variantParam = "&variant=original";
+  else if (variant === "subtitle") variantParam = `&variant=subtitle&lang=${encodeURIComponent(lang ?? "")}`;
   return `${baseUrl}/files/${encodeURIComponent(id)}?t=${token}&exp=${expiresAt}${variantParam}`;
 }
 
@@ -98,11 +104,11 @@ export interface FilesRouteDeps {
  * hand-placed MP4, and P2's catalog/stream handlers reuse the same table.
  */
 export function registerFilesRoute(app: FastifyInstance, deps: FilesRouteDeps): void {
-  app.get<{ Params: { id: string }; Querystring: { t?: string; exp?: string; variant?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { t?: string; exp?: string; variant?: string; lang?: string } }>(
     "/files/:id",
     async (req, reply) => {
       const { id } = req.params;
-      const { t, exp, variant } = req.query;
+      const { t, exp, variant, lang } = req.query;
       const expiresAt = Number(exp);
 
       if (!t || !exp || !verifyFileToken(deps.secret, id, expiresAt, t)) {
@@ -115,9 +121,27 @@ export function registerFilesRoute(app: FastifyInstance, deps: FilesRouteDeps): 
         )
         .get(id) as { filePathWebReady: string | null; filePathOriginal: string | null; status: string } | undefined;
 
-      const filePath = variant === "original" ? row?.filePathOriginal : row?.filePathWebReady;
+      if (!row || row.status !== "ready") {
+        return reply.code(404).send({ error: "not found" });
+      }
 
-      if (!row || row.status !== "ready" || !filePath) {
+      // Subtitles are small sidecar text files — no Range support needed,
+      // handled entirely separately from the video-streaming path below.
+      if (variant === "subtitle") {
+        if (!lang || !LANG_CODE_RE.test(lang) || !row.filePathWebReady) {
+          return reply.code(404).send({ error: "not found" });
+        }
+        try {
+          const content = readFileSync(sidecarPath(row.filePathWebReady, lang), "utf8");
+          reply.header("Content-Type", "application/x-subrip; charset=utf-8");
+          return reply.send(content);
+        } catch {
+          return reply.code(404).send({ error: "not found" });
+        }
+      }
+
+      const filePath = variant === "original" ? row.filePathOriginal : row.filePathWebReady;
+      if (!filePath) {
         return reply.code(404).send({ error: "not found" });
       }
 

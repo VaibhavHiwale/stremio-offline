@@ -215,6 +215,24 @@ export function markReady(db: Database, id: string, patch: { filePathWebReady: s
   ).run(patch.filePathWebReady, id);
 }
 
+/**
+ * Records that a sidecar subtitle now exists for this language — CLAUDE.md
+ * §3 Rule 9. The addon's `subtitles` resource trusts this column rather
+ * than checking the filesystem itself (keeps the addon package DB-only,
+ * consistent with the rest of its handlers). Idempotent: adding a language
+ * that's already recorded is a no-op, not a duplicate.
+ */
+export function addSubtitleLang(db: Database, id: string, lang: string): void {
+  const row = db.prepare("SELECT subtitle_langs AS value FROM download_items WHERE id = ?").get(id) as
+    | { value: string }
+    | undefined;
+  if (!row) return;
+  const langs = new Set(JSON.parse(row.value) as string[]);
+  if (langs.has(lang)) return;
+  langs.add(lang);
+  db.prepare("UPDATE download_items SET subtitle_langs = ? WHERE id = ?").run(JSON.stringify([...langs]), id);
+}
+
 /** Download phase complete, raw file in place — awaiting the P4 remux stage. */
 export function markAwaitingRemux(
   db: Database,

@@ -14,6 +14,8 @@ const STORAGE_ROOT = process.env.STORAGE_ROOT ?? join(process.cwd(), "data");
 const DB_PATH = process.env.DB_PATH ?? join(STORAGE_ROOT, ".offline", "db.sqlite");
 const SKIP_CERT_ACQUISITION = process.env.SKIP_CERT_ACQUISITION === "1";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ?? null;
+// Override point for tests/E2E — defaults to the real OpenSubtitles API inside subtitles/opensubtitles.ts when unset.
+const OPENSUBTITLES_BASE_URL = process.env.OPENSUBTITLES_BASE_URL;
 
 const loggerOptions = {
   level: process.env.LOG_LEVEL ?? "info",
@@ -40,7 +42,9 @@ async function main(): Promise<void> {
   }
 
   const scheduler = startScheduler({ db, storageRoot: STORAGE_ROOT });
-  const remuxRunner = startRemuxRunner({ db, storageRoot: STORAGE_ROOT });
+  const remuxRunnerDeps: Parameters<typeof startRemuxRunner>[0] = { db, storageRoot: STORAGE_ROOT };
+  if (OPENSUBTITLES_BASE_URL) remuxRunnerDeps.subtitlesBaseUrl = OPENSUBTITLES_BASE_URL;
+  const remuxRunner = startRemuxRunner(remuxRunnerDeps);
 
   let certStatus: SubsystemStatus = "down";
   let certExpiresAt: string | null = null;

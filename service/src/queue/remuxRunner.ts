@@ -2,13 +2,15 @@ import { promises as fsp } from "node:fs";
 import { cpus } from "node:os";
 import { dirname } from "node:path";
 import type { Database } from "better-sqlite3";
-import { getRemuxingRows, markFailed, markReady, type QueueRow } from "../db/downloadItems.js";
+import { addSubtitleLang, getRemuxingRows, markFailed, markReady, type QueueRow } from "../db/downloadItems.js";
+import { getDefaultSubtitleLangs, getOpenSubtitlesApiKey } from "../db/settings.js";
 import { decideRemuxPlan } from "../media/decision.js";
 import { probeFile } from "../media/probe.js";
 import { runFfmpeg } from "../media/remux.js";
 import { verifyRemuxOutput } from "../media/verify.js";
 import { computeLibraryPath } from "../storage/libraryPath.js";
 import { remuxTempPath } from "../storage/paths.js";
+import { fetchSubtitlesForItem } from "../subtitles/fetchForItem.js";
 import { sleep } from "../util/backoff.js";
 import { Semaphore } from "./semaphore.js";
 
@@ -17,7 +19,33 @@ export interface RemuxRunnerDeps {
   storageRoot: string;
   ffmpegPath?: string;
   ffprobePath?: string;
+  /** Injectable for tests — subtitles (P7) default to the real OpenSubtitles API. */
+  subtitlesBaseUrl?: string;
+  fetchImpl?: typeof fetch;
   signal?: AbortSignal;
+}
+
+/**
+ * Best-effort subtitle fetch after a successful publish — CLAUDE.md §3
+ * Rule 9. Never affects the download's `ready` status: skipped silently
+ * when no OpenSubtitles key is configured, and any per-language failure
+ * inside fetchSubtitlesForItem is already swallowed there.
+ */
+async function fetchSubtitlesBestEffort(deps: RemuxRunnerDeps, row: QueueRow, videoPath: string): Promise<void> {
+  const apiKey = getOpenSubtitlesApiKey(deps.db);
+  if (!apiKey) return;
+
+  const langs = getDefaultSubtitleLangs(deps.db);
+  const subtitleDeps: Parameters<typeof fetchSubtitlesForItem>[3] = { apiKey };
+  if (deps.subtitlesBaseUrl) subtitleDeps.baseUrl = deps.subtitlesBaseUrl;
+  if (deps.fetchImpl) subtitleDeps.fetchImpl = deps.fetchImpl;
+
+  try {
+    const results = await fetchSubtitlesForItem(videoPath, row.stremioId, langs, subtitleDeps);
+    for (const { lang } of results) addSubtitleLang(deps.db, row.id, lang);
+  } catch {
+    // Best-effort — never fail a ready download over a subtitle problem.
+  }
 }
 
 /**
@@ -77,6 +105,8 @@ export async function processRemuxRow(deps: RemuxRunnerDeps, row: QueueRow): Pro
   await fsp.rename(tempOut, finalPath); // atomic within a filesystem — CLAUDE.md §4
 
   markReady(deps.db, row.id, { filePathWebReady: finalPath });
+
+  await fetchSubtitlesBestEffort(deps, row, finalPath);
 }
 
 export interface RemuxRunnerHandle {
@@ -120,6 +150,8 @@ export function startRemuxRunner(
         const jobDeps: RemuxRunnerDeps = { db: deps.db, storageRoot: deps.storageRoot, signal: controller.signal };
         if (deps.ffmpegPath) jobDeps.ffmpegPath = deps.ffmpegPath;
         if (deps.ffprobePath) jobDeps.ffprobePath = deps.ffprobePath;
+        if (deps.subtitlesBaseUrl) jobDeps.subtitlesBaseUrl = deps.subtitlesBaseUrl;
+        if (deps.fetchImpl) jobDeps.fetchImpl = deps.fetchImpl;
         const job = processRemuxRow(jobDeps, row)
           .catch(() => undefined)
           .finally(() => {

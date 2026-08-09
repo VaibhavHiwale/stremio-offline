@@ -12,6 +12,7 @@ export interface AddonDeps {
   db: Database;
   buildFileUrl: (req: FastifyRequest, downloadItemId: string) => string;
   buildOriginalFileUrl: (req: FastifyRequest, downloadItemId: string) => string;
+  buildSubtitleUrl: (req: FastifyRequest, downloadItemId: string, lang: string) => string;
   resolveBaseUrl: (req: FastifyRequest) => string | null;
 }
 
@@ -28,7 +29,7 @@ export function registerAddonRoutes(app: FastifyInstance, deps: AddonDeps): void
     buildFileUrl: deps.buildFileUrl,
     buildOriginalFileUrl: deps.buildOriginalFileUrl,
   });
-  registerSubtitlesRoutes(app);
+  registerSubtitlesRoutes(app, { db: deps.db, buildSubtitleUrl: deps.buildSubtitleUrl });
   registerConfigureRoutes(app, { db: deps.db, resolveBaseUrl: deps.resolveBaseUrl });
 }
 

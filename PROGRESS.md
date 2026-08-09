@@ -16,7 +16,7 @@ keeping it tidy — a stale status here is worse than no file at all.
 | P4 Remux pipeline | ✅ done, pushed | commit `48d499f` |
 | P5 Queue | ✅ done, pushed | commit `3f8cb8a` |
 | P6 Resolvers | ✅ done, pushed | commit `30ae4b4` — **unverified against real debrid APIs**, see below |
-| P7 Subtitles | not started | |
+| P7 Subtitles | ✅ done, **not yet pushed** | see below — verified against a real local fake OpenSubtitles server, stronger confidence than P6 |
 | P8 Storage | not started | |
 | P9 Progress + dashboard | not started | |
 | P10 Episode auto-download | not started | |
@@ -60,154 +60,131 @@ later); `GET /download/:stremioId` Rule 6 trigger (needed P6 first, now
 done — still not built, see below); bulk pause/resume-all (not in CLAUDE.md
 §8, achievable today by looping per-item PATCH).
 
-## P6 — Resolvers: done, with an important caveat
+## P6 — Resolvers: done (condensed; full detail in commit `30ae4b4`) — caveat below
 
-**None of the five debrid API integrations have been exercised against a
-real account.** This was a deliberate, user-approved scope decision (no
-test credentials available) — see the "unverified" notes throughout this
-section before trusting any of it in production. Contrast with P0–P5, where
-"done" meant verified end-to-end against the real running service; here it
-means "implemented against each service's public API docs and covered by
-tests using a fake HTTP layer, but the actual wire contract is unconfirmed."
+Five debrid resolver modules (`resolvers/{realdebrid,alldebrid,premiumize,
+debridlink,torbox}.ts`) behind a common `DebridResolver` interface, plus
+`autodetect.ts` (Rule 7 priority order) and a webtorrent fallback
+(`downloaders/torrent.ts`, structurally typed so tests inject a fake
+client). `queue/runner.ts` branches on `sourceKind`; a `debrid` row
+resolves fresh on every attempt rather than caching the resolved URL,
+which makes "links expire, re-resolve" (CLAUDE.md §4) free by construction.
+`GET/POST/DELETE /debrid-accounts` for configuration (keys always masked in
+responses). **Caveat, still true, carries forward**: none of the five
+debrid API integrations have been exercised against a real account —
+implemented against public docs only, confidence lowest for DebridLink and
+TorBox. Verified end-to-end: the debrid-accounts REST surface, health
+reporting, and clean failure with no account configured — all against the
+real running service. A bounded real-webtorrent smoke test reached
+`downloading` but got no bytes in 25s (sandboxed network, not a code
+defect — also unverified). Deferred: real debrid API verification (the
+load-bearing gap — flag before production use); the source-addon client
+that would supply real magnets automatically is P10's job per CLAUDE.md
+§10, not P6's — today `magnet`/`debrid` enqueues need a magnet URI supplied
+directly.
+
+## P7 — Subtitles: done, and verified more thoroughly than P6
+
+Unlike the five debrid services (hardcoded base URLs, no way to redirect
+them in an E2E run), OpenSubtitles is a single service and its client was
+built with an **injectable base URL** from the start — which meant the E2E
+run below could exercise the *exact* real request/response flow this
+service uses against a real local HTTP server, not just in-process mocks.
+That's meaningfully stronger verification than P6 got, even though the
+actual `api.opensubtitles.com` contract is still unconfirmed (see caveat
+below) — same category of gap as P6, smaller in practice.
 
 ### Built
-- `service/src/resolvers/types.ts` — the common `DebridResolver` interface
-  (`resolveMagnet(apiKey, magnetUri, fetchImpl?) → ResolveOutcome`) all five
-  modules implement. `ResolveOutcome` is three-shaped
-  (`ready`/`pending`/`error`), not two — caching a torrent server-side takes
-  real time, so "not ready yet" has to be distinguishable from "failed."
-- `service/src/resolvers/{realdebrid,alldebrid,premiumize,debridlink,torbox}.ts`
-  — one module per CLAUDE.md §3 Rule 7's list. Each reconstructed from
-  public API documentation (no live testing). Confidence varies:
-  Real-Debrid and AllDebrid are the most commonly integrated APIs and their
-  contracts are the best understood; Premiumize's `directdl` fast-path
-  (instant resolve for already-cached content, only falling back to the
-  async `transfer/create` flow when needed) is a deliberate optimization to
-  avoid creating server-side state on every call; **DebridLink and TorBox
-  carry the least confidence** — DebridLink's public docs are thinner than
-  the other four, and both modules' field names are a starting point to
-  correct against a real account before relying on them. Every module's
-  file header says this explicitly.
-- `service/src/resolvers/autodetect.ts` — `getConfiguredResolver(db)` picks
-  the first enabled account in Rule 7's priority order (Real-Debrid →
-  AllDebrid → Premiumize → DebridLink → TorBox). Returns `null` when
-  nothing's configured, which the runner treats as "use `magnet` sourceKind
-  instead" (webtorrent fallback), not an error.
-- `service/src/db/debridAccounts.ts` + `service/src/api/debridAccounts.ts`
-  — `debrid_accounts` table (one row per service, upsert-by-service) and
-  `GET/POST/DELETE /debrid-accounts`. **Not explicitly in CLAUDE.md §8's API
-  table** — added because the resolvers need *some* way to learn a
-  configured key, mirroring the existing `GET|POST /addons` pattern.
-  Responses always mask the key (`****7890`) — never echo a full API key
-  back, same spirit as "no tokens in logs."
-- `service/src/downloaders/torrent.ts` — webtorrent fallback per Rule 7
-  ("webtorrent stays as fallback for users without a debrid account").
-  Downloads the largest file in the torrent, deselects everything else
-  (samples/NFOs/subtitles bundled in the release don't waste bandwidth).
-  Structurally typed against a minimal `WebTorrentClientLike` interface
-  (not the real `@types/webtorrent` shapes) specifically so tests can
-  inject a fake client instead of needing a real swarm.
-- `service/src/queue/runner.ts` — `processItem()` now branches on
-  `row.sourceKind`. `http` is unchanged (P3). `magnet` calls
-  `downloadMagnetToPart` directly. `debrid` calls `getConfiguredResolver` +
-  `resolveMagnet`, **fresh on every attempt** — deliberately never caches
-  the resolved URL in the DB (`source_url` stays the magnet, always). This
-  is what makes CLAUDE.md §4's "debrid links expire, re-resolve and resume"
-  requirement basically free: there's never a stale link to detect,
-  because nothing persists past one attempt. The tradeoff: a transient
-  network blip on a 'debrid' row triggers a fresh API call on retry too,
-  not just an expired-link scenario — simpler than distinguishing the two
-  cases, at the cost of extra debrid API calls on retry. A `pending`
-  resolve outcome is folded into the *existing* retryable-error/backoff
-  path (reuses `MAX_ATTEMPTS`/`incrementAttempt` rather than a new state
-  machine) — practically, a torrent that needs a long time to cache
-  server-side will eventually hit the 10-attempt ceiling and require a
-  manual retry, which was judged an acceptable, simple trade-off.
-  `RunnerDeps` gained an injectable `torrentClient` for tests, mirroring
-  the existing `fetchImpl` pattern.
-- `service/src/api/downloads.ts` — `POST /downloads` now requires
-  `sourceUrl` to start with `magnet:` when `sourceKind` is `magnet` or
-  `debrid`.
-- `service/src/api/health.ts` — `debrid` subsystem status is now real
-  (`ok` if any enabled account is configured, `down` otherwise) instead of
-  hardcoded `"down"`. Doesn't call out to the actual service — that would
-  slow down every health check and needs live credentials to mean anything.
-- `shared/types.ts` — added `DebridService`, `DebridAccount`.
-  `schema.sql` — added `debrid_accounts` table.
-- Dependency: `webtorrent` (+ `@types/webtorrent` dev dep). **Gotcha**: npm
-  flagged 8 packages (native modules like `utp-native`, `bufferutil`,
-  `node-datachannel`) whose install scripts weren't run under this
-  environment's `allow-scripts` policy. Untested whether webtorrent's core
-  functionality is affected — if real torrent downloads misbehave later,
-  check this first (`npm approve-scripts` or rebuild those natives),
-  especially on the Linux Docker deployment target.
+- `service/src/subtitles/opensubtitles.ts` — `searchSubtitle` (by numeric
+  IMDb id + language, picks the result with the highest `download_count`)
+  and `downloadSubtitle` (POST to get a temporary link, then GET that link
+  for the actual `.srt` text) against `api.opensubtitles.com/api/v1`.
+  Contract reconstructed from OpenSubtitles' public docs — **not verified
+  against a live API key**, same caveat as P6's resolvers. Both functions
+  take an optional `baseUrl` (default the real API) specifically so this
+  could be pointed at a local fake server for real E2E testing.
+- `service/src/subtitles/sidecar.ts` — `sidecarPath(videoPath, lang)`
+  (`The Matrix (1999).mp4` → `The Matrix (1999).en.srt`, matching CLAUDE.md
+  §7's library layout example) and `writeSidecar`. Validates the language
+  code against a strict regex before ever building a path from it — a
+  malicious/malformed lang string can't escape the library directory.
+- `service/src/subtitles/fetchForItem.ts` — `fetchSubtitlesForItem`
+  orchestrates search → download → write-sidecar per language, and
+  `parseImdbId` extracts the numeric id from a `stremioId` like
+  `tt0903747:1:2`. Deliberately never throws: one language's failure
+  (not found, quota, network) doesn't affect the others or the download's
+  own status — the video is already playable without it.
+- `service/src/queue/remuxRunner.ts` — calls `fetchSubtitlesForItem`
+  right after `markReady` (best-effort, wrapped in its own try/catch),
+  using `settings.open_subtitles_api_key` / `settings.subtitle_langs`
+  (skipped silently, not an error, when no key is configured). Successful
+  languages get recorded onto the row via the new `addSubtitleLang` DB
+  primitive — the addon's `subtitles` handler trusts that column instead
+  of checking the filesystem itself, keeping the addon package DB-only
+  like every other handler there.
+- `service/src/api/files.ts` — `/files/:id` gained a `variant=subtitle`
+  mode (`&lang=<code>`, same strict regex check) serving the sidecar as
+  `application/x-subrip`, no Range support (subtitle files are tiny).
+  `buildSignedFileUrl` extended with an optional `lang` param — the token
+  itself still isn't variant-specific (same reasoning as P4's
+  original/web-ready split: every variant of an id belongs to the same
+  authorized download item).
+- `addon/src/handlers/subtitles.ts` — replaced the P2 stub. Returns one
+  `SubtitleEntry` per language recorded in `subtitle_langs` for each
+  `ready` row matching the `stremioId`, with a signed URL from the new
+  `buildSubtitleUrl` dependency (mirrors `buildFileUrl`/
+  `buildOriginalFileUrl`'s wiring through `app.ts`).
+  `addon/src/repository.ts` gained `subtitleLangsRaw` +
+  `parseSubtitleLangs()`.
+- `shared/types.ts` — added `Settings.openSubtitlesApiKey`. `schema.sql` —
+  added `settings.open_subtitles_api_key`.
+- `index.ts` — `OPENSUBTITLES_BASE_URL` env var overrides the resolver's
+  default base URL, threaded through to `startRemuxRunner`. Exists purely
+  for testability (see the E2E note below) — unset in normal operation, so
+  production always hits the real API.
 
 ### Tests
-127 total (was 82): one test file per resolver against a hand-rolled fake
-`fetch` (happy path, a `pending`/still-caching case, and at least one
-terminal + one retryable error per service);
-`resolvers/autodetect.test.ts` (priority ordering, disabled accounts,
-upsert-replaces-not-duplicates); `downloaders/torrent.test.ts` against a
-fake `WebTorrentClientLike` (largest-file selection, progress, disk-full,
-abort, no-files error) — the fake client is shared
-(`testutils/fakeTorrentClient.ts`) with `queue/runner.test.ts`'s new
-`sourceKind` branch tests. **Gotcha**: the first draft of the fake client
-deferred its callback via `queueMicrotask`, racing against the test's
-`fsp.mkdir` (real async I/O) with no reliable ordering — two tests hung for
-20s before failing. Fixed by making the fake callback fire synchronously
-and exposing a `whenAdded` promise the test awaits instead of guessing with
-`setImmediate`/`setTimeout`. The `debrid` branch test in `runner.test.ts`
-is worth calling out: it fakes only the Real-Debrid API calls and lets the
-*actual* file download hit a real local test HTTP server through the real
-`fetch`, proving the resolved URL flows through the exact same
-`downloadToPart()` path as `sourceKind: "http"`. `api/debridAccounts.test.ts`
-covers the REST CRUD, including that the masked key never contains the
-real secret.
+38 new (144 service + 10 addon total): `subtitles/opensubtitles.test.ts`,
+`subtitles/sidecar.test.ts` (including the path-traversal-rejection case),
+`subtitles/fetchForItem.test.ts` (per-language independence — one API
+error doesn't block another language's fetch); `queue/remuxRunner.test.ts`
+extended with 3 P7 cases (subtitle fetched after publish, a subtitle
+network error never fails the download, fetching is skipped entirely with
+no key configured); `api/files.test.ts` extended with real
+`registerFilesRoute` + Fastify `.inject()` tests for the subtitle variant
+(serves content, rejects a path-traversal-shaped lang, 404s when never
+fetched); `addon/src/handlers/subtitles.test.ts` (new — first
+Fastify-`.inject()`-based handler test in the addon package, against a
+minimal inline SQLite schema since the addon package doesn't depend on the
+service package).
 
-### End-to-end verification performed (partial — see caveat above)
-Booted the real service and, over real HTTP: configured a debrid account
-via `POST /debrid-accounts`, watched `/health`'s `debrid` subsystem flip
-`down → ok → down` as the account was added/removed (fully real, no
-mocking possible or needed); enqueued a `debrid` job with no account
-configured and confirmed it reaches `failed` with a clear `lastError`
-end-to-end through the real API (not just a unit test). **Then attempted a
-real webtorrent smoke test** against Sintel (a legal, Creative-Commons,
-widely-used BitTorrent test torrent — not scraped/bundled content, just a
-magnet URI in a throwaway test script) to see whether real P2P
-connectivity works from this environment at all: the job reached
-`downloading` status (torrent added, metadata presumably fetched) but
-received zero bytes within a 25-second bound. Most likely this sandboxed
-environment blocks outbound P2P/DHT/tracker traffic — expected, not a code
-defect — but this remains **genuinely unverified**, not just
-"unverified against a real account" like the debrid modules. The debrid
-API calls themselves (Real-Debrid, AllDebrid, Premiumize, DebridLink,
-TorBox) were **not** exercised at all in this E2E run — there was no way
-to redirect their hardcoded `https://api.<service>.com` base URLs to a
-local fake server without editing the modules for a one-off test, so that
-gap is closed only by the mocked-fetch unit tests, not by anything hitting
-the real running service.
+### End-to-end verification performed
+Booted the real service with a **real local HTTP server implementing the
+actual OpenSubtitles endpoints** (`/subtitles`, `/download`, and the
+downloaded-content URL) pointed to via `OPENSUBTITLES_BASE_URL` — not
+mocked fetch inside the same process, an actual second server the real
+`fetch` calls hit. Ran a real download through the full pipeline
+(download → remux → ready), confirmed the subtitle search fired exactly
+once against the fake server, the sidecar got written with the exact
+content that server returned, `subtitle_langs` recorded `["en"]` on the
+row, `GET /subtitles/movie/:id.json` returned the real signed URL, and
+`GET` on that URL served the real `.srt` content with the correct
+`application/x-subrip` content-type. All 8 checks passed.
 
-### Deferred / not done in P6
-- Real verification of all five debrid API contracts against live
-  accounts. **This is the load-bearing gap in this phase** — flag it
-  clearly to the user before shipping; field names, auth schemes, and
-  status-value spellings may all need correction.
-- Real webtorrent P2P verification (couldn't confirm outbound connectivity
-  works in this environment at all).
-- `GET /resolve?stremioId=&type=` (CLAUDE.md §8) and the source-addon
-  client that would feed it real magnets from the user's own configured
-  Stremio addons — that's `addonClient.ts`, which CLAUDE.md §10 explicitly
-  assigns to **P10** ("P10 addonClient.ts queries registered source addons
-  ... superset of P6; don't start it earlier"), not P6. Today, a `magnet`
-  or `debrid` enqueue requires the caller to already have a magnet URI in
-  hand (e.g. from a dashboard, or pasted manually) — there's no in-app way
-  yet to go from a `stremioId` to a magnet automatically.
-- `GET /download/:stremioId` (Rule 6's TV-remote trigger + pre-generated
-  confirmation MP4 clip) — depends on the above (needs a real source to
-  enqueue from just a `stremioId`).
-- Link re-resolution is "resolve fresh every attempt," not a distinct
-  "detect a 403/404 specifically and re-resolve" code path — see the
-  runner.ts note above for the reasoning and the accepted trade-off.
+### Deferred / not done in P7
+- Real verification against `api.opensubtitles.com` itself (need a real
+  account/key) — the E2E above proves the *client's* HTTP mechanics are
+  correct, not that OpenSubtitles' actual field names match what the code
+  expects.
+- Sidecar files are only ever written for the **web-ready** file
+  (`file_path_web_ready`), never for the original — consistent with P4's
+  "the web-ready MP4 is the primary served asset" stance, but means a user
+  playing the "Original quality" stream entry (P4 Rule 1's second entry)
+  won't get an automatically-served subtitle for it, only the sidecar
+  living next to the web-ready copy.
+- No re-fetch/refresh mechanism if a subtitle turns out to be
+  out-of-sync — `subtitle_langs` only ever grows, there's no way to clear
+  a bad entry short of editing the DB directly.
 
 ## Environment / gotchas learned so far (don't rediscover these)
 

@@ -81,6 +81,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       const baseUrl = resolveBaseUrl(req, deps.configuredBaseUrl);
       return buildSignedFileUrl(baseUrl, deps.fileTokenSecret, downloadItemId, FILE_URL_TTL_SECONDS, "original");
     },
+    buildSubtitleUrl: (req: FastifyRequest, downloadItemId: string, lang: string) => {
+      const baseUrl = resolveBaseUrl(req, deps.configuredBaseUrl);
+      return buildSignedFileUrl(baseUrl, deps.fileTokenSecret, downloadItemId, FILE_URL_TTL_SECONDS, "subtitle", lang);
+    },
     resolveBaseUrl: (req: FastifyRequest) => {
       try {
         return resolveBaseUrl(req, deps.configuredBaseUrl);

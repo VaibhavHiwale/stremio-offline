@@ -89,6 +89,8 @@ export interface Settings {
   maxConcurrentRemuxes: number;
   defaultStorageTargetId: string;
   subtitleLangs: string[];
+  /** User-supplied — CLAUDE.md §5: "OpenSubtitles API (user-supplied key)". Null until configured; subtitle fetching (P7) is skipped, not an error, when unset. */
+  openSubtitlesApiKey: string | null;
   publicBaseUrl: string | null;
   legalNoticeAcceptedAt: string | null;
 }

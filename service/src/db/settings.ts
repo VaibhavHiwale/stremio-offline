@@ -7,3 +7,16 @@ export function getMaxConcurrentDownloads(db: Database): number {
     | undefined;
   return row?.value ?? 2;
 }
+
+/** Null when the user hasn't configured one — P7 subtitle fetching is skipped, not an error, in that case (CLAUDE.md §5: "user-supplied key"). */
+export function getOpenSubtitlesApiKey(db: Database): string | null {
+  const row = db.prepare("SELECT open_subtitles_api_key AS value FROM settings WHERE id = 1").get() as
+    | { value: string | null }
+    | undefined;
+  return row?.value ?? null;
+}
+
+export function getDefaultSubtitleLangs(db: Database): string[] {
+  const row = db.prepare("SELECT subtitle_langs AS value FROM settings WHERE id = 1").get() as { value: string } | undefined;
+  return row ? (JSON.parse(row.value) as string[]) : ["en"];
+}

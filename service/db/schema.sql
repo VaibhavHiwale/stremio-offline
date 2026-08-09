@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS settings (
   max_concurrent_remuxes    INTEGER NOT NULL DEFAULT 1,
   default_storage_target_id TEXT,
   subtitle_langs            TEXT NOT NULL DEFAULT '["en"]', -- JSON array
+  open_subtitles_api_key    TEXT,
   public_base_url           TEXT,
   legal_notice_accepted_at  TEXT
 );

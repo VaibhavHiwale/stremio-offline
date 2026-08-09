@@ -18,6 +18,7 @@ export interface DownloadItemRow {
   etaSeconds: number | null;
   filePathOriginal: string | null;
   filePathWebReady: string | null;
+  subtitleLangsRaw: string;
   priority: number;
   addedAt: string;
 }
@@ -27,8 +28,17 @@ const ROW_COLUMNS = `
   quality, status, progress_pct AS progressPct, bytes_downloaded AS bytesDownloaded,
   bytes_total AS bytesTotal, speed_bps AS speedBps, eta_seconds AS etaSeconds,
   file_path_original AS filePathOriginal, file_path_web_ready AS filePathWebReady,
-  priority, added_at AS addedAt
+  subtitle_langs AS subtitleLangsRaw, priority, added_at AS addedAt
 `;
+
+/** subtitle_langs is stored as a JSON TEXT column — parsed lazily by callers that need it (stream.ts, subtitles.ts) rather than on every row read. */
+export function parseSubtitleLangs(row: DownloadItemRow): string[] {
+  try {
+    return JSON.parse(row.subtitleLangsRaw) as string[];
+  } catch {
+    return [];
+  }
+}
 
 const VISIBLE_STATUSES = "status NOT IN ('cancelled', 'deleted')";
 
