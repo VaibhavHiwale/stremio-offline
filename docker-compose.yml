@@ -4,11 +4,18 @@ services:
     image: stremio-offline:local
     restart: unless-stopped
     ports:
-      - "11470:11470" # HTTP (P1 adds 12470 for HTTPS)
+      - "11470:11470" # HTTP — localhost-only inside the container (CLAUDE.md §3 Rule 2); mapped out mainly for /health and /diagnostics during setup.
+      - "12470:12470" # HTTPS — the LAN-facing port every real client (phone/TV/etc.) actually connects to. Must stay open for the acceptance matrix in CLAUDE.md §9.
     environment:
-      - PORT=11470
+      - HTTP_PORT=11470
+      - HTTPS_PORT=12470
       - STORAGE_ROOT=/data
-      # - PUBLIC_BASE_URL=https://your-host.stremio.rocks:12470   # set once P1 cert transport lands
+      # PUBLIC_BASE_URL: only set this if automatic cert acquisition
+      # (service/src/transport/certManager.ts, tried first) doesn't work for
+      # your network — e.g. behind a tunnel with a known stable hostname.
+      # Leave it commented out to let the service acquire its own
+      # *.stremio.rocks certificate for this host's LAN IP automatically.
+      # - PUBLIC_BASE_URL=https://your-host.stremio.rocks:12470
     volumes:
       - stremio-offline-data:/data
 
